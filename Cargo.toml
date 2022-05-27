@@ -1,0 +1,20 @@
+[package]
+name = "trithemius"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "trithemiuslib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trithemius"
+path = "src/bin.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3.17"
+libp2p = { version = "0.44.0", features = ["tcp-tokio"] }
+tokio = { version = "1.12.0", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+env_logger = "0.9.0"
