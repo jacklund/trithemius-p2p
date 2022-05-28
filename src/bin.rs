@@ -3,6 +3,7 @@ use libp2p::{
     floodsub::{self, Floodsub, FloodsubEvent},
     identity,
     mdns::{Mdns, MdnsEvent},
+    ping::{Ping, PingConfig, PingEvent},
     // `TokioTcpConfig` is available through the `tcp-tokio` feature.
     Multiaddr,
     NetworkBehaviour,
@@ -15,6 +16,7 @@ use trithemiuslib::{create_transport, Engine, EventHandler, InputHandler};
 enum Event {
     FloodsubEvent(FloodsubEvent),
     MdnsEvent(MdnsEvent),
+    PingEvent(PingEvent),
 }
 
 impl From<FloodsubEvent> for Event {
@@ -29,6 +31,12 @@ impl From<MdnsEvent> for Event {
     }
 }
 
+impl From<PingEvent> for Event {
+    fn from(event: PingEvent) -> Self {
+        Self::PingEvent(event)
+    }
+}
+
 // We create a custom network behaviour that combines floodsub and mDNS.
 // The derive generates a delegating `NetworkBehaviour` impl which in turn
 // requires the implementations of `NetworkBehaviourEventProcess` for
@@ -39,6 +47,7 @@ impl From<MdnsEvent> for Event {
 struct MyBehaviour {
     floodsub: Floodsub,
     mdns: Mdns,
+    ping: Ping,
 }
 
 struct StdinHandler {
@@ -80,16 +89,13 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
                     for (peer, _) in list {
                         if !self.known_peers.contains(&peer) {
                             println!("Discovered peer {}", peer);
-                            if let Err(error) = engine.swarm().dial(peer) {
-                                eprintln!("Error connecting to peer {}: {}", peer, error);
-                            }
+                            engine
+                                .swarm()
+                                .behaviour_mut()
+                                .floodsub
+                                .add_node_to_partial_view(peer);
+                            self.known_peers.push(peer);
                         }
-                        engine
-                            .swarm()
-                            .behaviour_mut()
-                            .floodsub
-                            .add_node_to_partial_view(peer);
-                        self.known_peers.push(peer);
                     }
                 }
                 MdnsEvent::Expired(list) => {
@@ -101,13 +107,6 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
                                 .behaviour_mut()
                                 .floodsub
                                 .remove_node_from_partial_view(&peer);
-                            if let Err(()) = engine.swarm().disconnect_peer_id(peer) {
-                                eprintln!("Error disconnecting from peer {}: Not connected", peer);
-                            }
-                            let index = self.known_peers.iter().position(|p| *p == peer);
-                            if let Some(index) = index {
-                                self.known_peers.remove(index);
-                            }
                         }
                     }
                 }
@@ -122,6 +121,9 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
                 }
                 _ => (),
             },
+            Event::PingEvent(_ping_event) => {
+                // println!("{:?}", ping_event);
+            }
         }
 
         Ok(())
@@ -179,6 +181,7 @@ async fn main() -> Result<(), std::io::Error> {
         let mut behaviour = MyBehaviour {
             floodsub: Floodsub::new(peer_id.clone()),
             mdns,
+            ping: Ping::new(PingConfig::new().with_keep_alive(true)),
         };
 
         behaviour.floodsub.subscribe(floodsub_topic.clone());
