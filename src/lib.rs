@@ -5,7 +5,9 @@ use libp2p::{
     identity,
     mplex,
     noise,
-    swarm::{NetworkBehaviour, Swarm, SwarmBuilder, SwarmEvent},
+    swarm::{
+        ConnectionHandler, IntoConnectionHandler, NetworkBehaviour, Swarm, SwarmBuilder, SwarmEvent,
+    },
     // `TokioTcpConfig` is available through the `tcp-tokio` feature.
     tcp::TokioTcpConfig,
     Multiaddr,
@@ -31,12 +33,14 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
 
 #[async_trait]
 pub trait InputHandler<B: NetworkBehaviour> {
-    async fn get_input(&mut self) -> io::Result<Option<String>>;
+    type Event;
+
+    async fn get_input(&mut self) -> Option<io::Result<Self::Event>>;
 
     fn handle_input(
-        &self,
+        &mut self,
         engine: &mut Engine<B>,
-        line: Option<String>,
+        line: Option<Self::Event>,
     ) -> Result<(), std::io::Error>;
 }
 
@@ -44,7 +48,7 @@ pub trait EventHandler<B: NetworkBehaviour> {
     fn handle_event(
         &mut self,
         engine: &mut Engine<B>,
-        event: B::OutEvent,
+        event: SwarmEvent<B::OutEvent, <<<B as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::Error>,
     ) -> Result<(), std::io::Error>;
 }
 
@@ -83,23 +87,18 @@ where
         &mut self.swarm
     }
 
-    pub async fn run(
+    pub async fn run<I: InputHandler<B>, E: EventHandler<B>>(
         &mut self,
-        input_handler: &mut dyn InputHandler<B>,
-        event_handler: &mut dyn EventHandler<B>,
+        mut input_handler: I,
+        mut event_handler: E,
     ) -> Result<(), std::io::Error> {
         loop {
             tokio::select! {
                 line = input_handler.get_input() => {
-                    input_handler.handle_input(self, line?)?;
+                    input_handler.handle_input(self, line.transpose()?)?;
                 },
                 event = self.swarm().select_next_some() => {
-                    if let SwarmEvent::NewListenAddr { address, .. } = event {
-                        println!("Listening on {:?}", address);
-                    }
-                    else if let SwarmEvent::Behaviour(behaviour_event) = event {
-                        event_handler.handle_event(self, behaviour_event)?;
-                    }
+                    event_handler.handle_event(self, event)?;
                 }
             }
         }

@@ -1,4 +1,13 @@
+mod config;
+mod renderer;
+mod state;
+mod ui;
+mod util;
+
+use crate::state::{ChatMessage, CursorMovement, MessageType, ScrollMovement, State};
 use async_trait::async_trait;
+use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use futures::{future::FutureExt, select, StreamExt};
 use libp2p::{
     core::either::EitherError,
     floodsub::{self, Floodsub, FloodsubEvent},
@@ -11,9 +20,9 @@ use libp2p::{
     NetworkBehaviour,
     PeerId,
 };
+use renderer::Renderer;
 use tokio::io::{self, AsyncBufReadExt};
 use trithemiuslib::{create_transport, Engine, EventHandler, InputHandler};
-use void;
 
 #[derive(Debug)]
 enum Event {
@@ -53,16 +62,80 @@ struct MyBehaviour {
     ping: Ping,
 }
 
-struct StdinHandler {
-    stdin: io::Lines<io::BufReader<io::Stdin>>,
+struct TermHandler {
+    reader: EventStream,
+    renderer: Renderer,
+    state: State,
     floodsub_topic: floodsub::Topic,
 }
 
-impl StdinHandler {
+impl TermHandler {
     fn new(floodsub_topic: floodsub::Topic) -> Self {
         Self {
-            stdin: io::BufReader::new(io::stdin()).lines(),
+            reader: EventStream::new(),
+            renderer: Renderer::new(),
+            state: State::default(),
             floodsub_topic,
+        }
+    }
+}
+
+#[async_trait]
+impl InputHandler<MyBehaviour> for TermHandler {
+    type Event = TermEvent;
+
+    async fn get_input(&mut self) -> Option<io::Result<Self::Event>> {
+        let mut event = self.reader.next().fuse();
+        event.await
+    }
+
+    fn handle_input(
+        &mut self,
+        engine: &mut Engine<MyBehaviour>,
+        event: Option<Self::Event>,
+    ) -> Result<(), std::io::Error> {
+        match event {
+            Some(TermEvent::Mouse(_)) => Ok(()),
+            Some(TermEvent::Resize(_, _)) => Ok(()),
+            Some(TermEvent::Key(KeyEvent { code, modifiers })) => match code {
+                // KeyCode::Esc => self.node.signals().send_with_priority(Signal::Close(None)),
+                KeyCode::Char(character) => {
+                    // if character == 'c' && modifiers.contains(KeyModifiers::CONTROL) {
+                    //     self.node.signals().send_with_priority(Signal::Close(None))
+                    // } else {
+                    self.state.input_write(character);
+                    Ok(())
+                    // }
+                }
+                KeyCode::Enter => {
+                    if let Some(input) = self.state.reset_input() {
+                        let message = ChatMessage::new(
+                            "me".to_string(),
+                            // format!("{} (me)", self.config.user_name),
+                            MessageType::Text(input.clone()),
+                        );
+                        self.state.add_message(message);
+
+                        engine
+                            .swarm()
+                            .behaviour_mut()
+                            .floodsub
+                            .publish(self.floodsub_topic.clone(), input.clone().as_bytes());
+                    }
+                    Ok(())
+                }
+                KeyCode::Delete => Ok(self.state.input_remove()),
+                KeyCode::Backspace => Ok(self.state.input_remove_previous()),
+                KeyCode::Left => Ok(self.state.input_move_cursor(CursorMovement::Left)),
+                KeyCode::Right => Ok(self.state.input_move_cursor(CursorMovement::Right)),
+                KeyCode::Home => Ok(self.state.input_move_cursor(CursorMovement::Start)),
+                KeyCode::End => Ok(self.state.input_move_cursor(CursorMovement::End)),
+                KeyCode::Up => Ok(self.state.messages_scroll(ScrollMovement::Up)),
+                KeyCode::Down => Ok(self.state.messages_scroll(ScrollMovement::Down)),
+                KeyCode::PageUp => Ok(self.state.messages_scroll(ScrollMovement::Start)),
+                _ => Ok(()),
+            },
+            None => Ok(()),
         }
     }
 }
@@ -139,38 +212,6 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
     }
 }
 
-#[async_trait]
-impl InputHandler<MyBehaviour> for StdinHandler {
-    type Event = String;
-
-    async fn get_input(&mut self) -> Option<io::Result<Self::Event>> {
-        self.stdin.next_line().await.transpose()
-    }
-
-    fn handle_input(
-        &mut self,
-        engine: &mut Engine<MyBehaviour>,
-        line: Option<Self::Event>,
-    ) -> Result<(), std::io::Error> {
-        match line {
-            Some(string) => {
-                engine
-                    .swarm()
-                    .behaviour_mut()
-                    .floodsub
-                    .publish(self.floodsub_topic.clone(), string.as_bytes());
-                Ok(())
-            }
-
-            // Ctrl-d
-            None => {
-                eprintln!("stdin closed");
-                Ok(())
-            }
-        }
-    }
-}
-
 /// The `tokio::main` attribute sets up a tokio runtime.
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -207,13 +248,13 @@ async fn main() -> Result<(), std::io::Error> {
         println!("Dialed {:?}", to_dial);
     }
 
-    let stdin_handler = StdinHandler::new(floodsub_topic);
-    let event_handler = MyEventHandler::new();
+    let mut term_handler = TermHandler::new(floodsub_topic);
+    let mut event_handler = MyEventHandler::new();
 
     // Listen on all interfaces and whatever port the OS assigns
     engine
         .listen("/ip4/0.0.0.0/tcp/0".parse().unwrap())
         .unwrap();
 
-    engine.run(stdin_handler, event_handler).await
+    engine.run(term_handler, event_handler).await
 }
