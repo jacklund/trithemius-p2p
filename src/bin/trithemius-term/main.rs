@@ -26,9 +26,7 @@ use renderer::Renderer;
 use std::pin::Pin;
 use std::task::Context;
 use tokio::io::{self, AsyncBufReadExt};
-use trithemiuslib::{
-    create_transport, ChatMessage, Engine, EngineEvent, EventHandler, InputHandler,
-};
+use trithemiuslib::{create_transport, ChatMessage, Engine, EngineEvent, Handler};
 
 #[derive(Debug)]
 enum Event {
@@ -68,32 +66,6 @@ struct MyBehaviour {
     ping: Ping,
 }
 
-struct TermHandler {
-    my_identity: PeerId,
-    reader: EventStream,
-    renderer: Renderer,
-    state: State,
-    floodsub_topic: floodsub::Topic,
-    theme: config::Theme,
-}
-
-impl TermHandler {
-    fn new(my_identity: PeerId, floodsub_topic: floodsub::Topic) -> Self {
-        let mut renderer = Renderer::new();
-        let state = State::default();
-        let theme = config::Theme::default();
-        renderer.render(&state, &theme).unwrap();
-        Self {
-            my_identity,
-            reader: EventStream::new(),
-            renderer,
-            state,
-            floodsub_topic,
-            theme,
-        }
-    }
-}
-
 struct TermInputStream {
     reader: EventStream,
 }
@@ -120,14 +92,35 @@ impl futures::stream::FusedStream for TermInputStream {
     }
 }
 
-#[async_trait]
-impl InputHandler<MyBehaviour, TermInputStream> for TermHandler {
-    type Event = TermEvent;
+struct MyHandler {
+    my_identity: PeerId,
+    renderer: Renderer,
+    state: State,
+    floodsub_topic: floodsub::Topic,
+    theme: config::Theme,
+    known_peers: Vec<PeerId>,
+}
 
-    fn handle_network_message(&mut self, chat_message: ChatMessage) -> Result<(), std::io::Error> {
-        self.state.add_message(chat_message);
-        Ok(())
+impl MyHandler {
+    fn new(my_identity: PeerId, floodsub_topic: floodsub::Topic) -> Self {
+        let mut renderer = Renderer::new();
+        let state = State::default();
+        let theme = config::Theme::default();
+        renderer.render(&state, &theme).unwrap();
+        Self {
+            my_identity,
+            renderer,
+            state,
+            floodsub_topic,
+            theme,
+            known_peers: Vec::new(),
+        }
     }
+}
+
+#[async_trait]
+impl Handler<MyBehaviour, TermInputStream> for MyHandler {
+    type Event = TermEvent;
 
     fn handle_input(
         &mut self,
@@ -204,21 +197,7 @@ impl InputHandler<MyBehaviour, TermInputStream> for TermHandler {
 
         ret
     }
-}
 
-struct MyEventHandler {
-    known_peers: Vec<PeerId>,
-}
-
-impl MyEventHandler {
-    fn new() -> Self {
-        Self {
-            known_peers: Vec::new(),
-        }
-    }
-}
-
-impl EventHandler<MyBehaviour> for MyEventHandler {
     fn handle_event(
         &mut self,
         engine: &mut Engine<MyBehaviour>,
@@ -264,9 +243,13 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
                     }
                 },
                 Event::FloodsubEvent(fs_event) => match fs_event {
-                    FloodsubEvent::Message(message) => Some(EngineEvent::ChatMessage(
-                        ChatMessage::new(message.source, String::from_utf8(message.data).unwrap()),
-                    )),
+                    FloodsubEvent::Message(message) => {
+                        self.state.add_message(ChatMessage::new(
+                            message.source,
+                            String::from_utf8(message.data).unwrap(),
+                        ));
+                        None
+                    }
                     _ => None,
                 },
                 Event::PingEvent(ping_event) => {
@@ -276,6 +259,10 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
             },
             _ => None,
         })
+    }
+
+    fn update(&mut self) -> Result<(), std::io::Error> {
+        Ok(self.renderer.render(&mut self.state, &self.theme).unwrap())
     }
 }
 
@@ -316,15 +303,12 @@ async fn main() -> Result<(), std::io::Error> {
         debug!("Dialed {:?}", to_dial);
     }
 
-    let mut term_handler = TermHandler::new(peer_id, floodsub_topic);
-    let mut event_handler = MyEventHandler::new();
+    let handler = MyHandler::new(peer_id, floodsub_topic);
 
     // Listen on all interfaces and whatever port the OS assigns
     engine
         .listen("/ip4/0.0.0.0/tcp/0".parse().unwrap())
         .unwrap();
 
-    engine
-        .run(TermInputStream::new(), term_handler, event_handler)
-        .await
+    engine.run(TermInputStream::new(), handler).await
 }

@@ -56,7 +56,7 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
 }
 
 #[async_trait]
-pub trait InputHandler<B: NetworkBehaviour, F: FusedStream> {
+pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
     type Event;
 
     fn handle_input(
@@ -65,15 +65,13 @@ pub trait InputHandler<B: NetworkBehaviour, F: FusedStream> {
         line: F::Item,
     ) -> Result<Option<EngineEvent>, std::io::Error>;
 
-    fn handle_network_message(&mut self, chat_message: ChatMessage) -> Result<(), std::io::Error>;
-}
-
-pub trait EventHandler<B: NetworkBehaviour> {
     fn handle_event(
         &mut self,
         engine: &mut Engine<B>,
         event: SwarmEvent<B::OutEvent, <<<B as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::Error>,
     ) -> Result<Option<EngineEvent>, std::io::Error>;
+
+    fn update(&mut self) -> Result<(), std::io::Error>;
 }
 
 pub struct Engine<B: NetworkBehaviour> {
@@ -111,32 +109,25 @@ where
         &mut self.swarm
     }
 
-    pub async fn run<
-        F: FusedStream + std::marker::Unpin,
-        I: InputHandler<B, F>,
-        E: EventHandler<B>,
-    >(
+    pub async fn run<F: FusedStream + std::marker::Unpin, H: Handler<B, F>>(
         &mut self,
         mut input_stream: F,
-        mut input_handler: I,
-        mut event_handler: E,
+        mut handler: H,
     ) -> Result<(), std::io::Error> {
         loop {
             tokio::select! {
                 line = input_stream.select_next_some() => {
-                    match input_handler.handle_input(self, line)? {
+                    match handler.handle_input(self, line)? {
                         Some(EngineEvent::Shutdown) => break Ok(()),
                         _ => (),
                     }
                 },
                 event = self.swarm().select_next_some() => {
-                    match event_handler.handle_event(self, event)? {
-                        Some(EngineEvent::ChatMessage(chat_message)) => input_handler.handle_network_message(chat_message)?,
-                        Some(_) => (),
-                        None => (),
-                    }
+                    handler.handle_event(self, event)?;
                 }
             }
+
+            handler.update()?;
         }
     }
 }
