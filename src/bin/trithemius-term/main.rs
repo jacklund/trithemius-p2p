@@ -1,10 +1,7 @@
 mod config;
-mod renderer;
-mod state;
 mod ui;
-mod util;
 
-use crate::state::{CursorMovement, ScrollMovement, State};
+use crate::ui::{CursorMovement, Renderer, ScrollMovement, UI};
 use async_trait::async_trait;
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{future::FutureExt, select, task::Poll};
@@ -22,7 +19,6 @@ use libp2p::{
     PeerId,
 };
 use log::{debug, error, LevelFilter};
-use renderer::Renderer;
 use std::pin::Pin;
 use std::task::Context;
 use tokio::io::{self, AsyncBufReadExt};
@@ -94,8 +90,8 @@ impl futures::stream::FusedStream for TermInputStream {
 
 struct MyHandler {
     my_identity: PeerId,
+    ui: UI,
     renderer: Renderer,
-    state: State,
     floodsub_topic: floodsub::Topic,
     theme: config::Theme,
     known_peers: Vec<PeerId>,
@@ -103,14 +99,14 @@ struct MyHandler {
 
 impl MyHandler {
     fn new(my_identity: PeerId, floodsub_topic: floodsub::Topic) -> Self {
-        let mut renderer = Renderer::new();
-        let state = State::default();
+        let ui = UI::default();
         let theme = config::Theme::default();
-        renderer.render(&state, &theme).unwrap();
+        let mut renderer = Renderer::new();
+        renderer.render(&ui, &theme).unwrap();
         Self {
             my_identity,
+            ui,
             renderer,
-            state,
             floodsub_topic,
             theme,
             known_peers: Vec::new(),
@@ -136,14 +132,14 @@ impl Handler<MyBehaviour, TermInputStream> for MyHandler {
                     if character == 'c' && modifiers.contains(KeyModifiers::CONTROL) {
                         Ok(Some(EngineEvent::Shutdown))
                     } else {
-                        self.state.input_write(character);
+                        self.ui.input_write(character);
                         Ok(None)
                     }
                 }
                 KeyCode::Enter => {
-                    if let Some(input) = self.state.reset_input() {
+                    if let Some(input) = self.ui.reset_input() {
                         let message = ChatMessage::new(self.my_identity, input.clone());
-                        self.state.add_message(message);
+                        self.ui.add_message(message);
 
                         engine
                             .swarm()
@@ -154,46 +150,46 @@ impl Handler<MyBehaviour, TermInputStream> for MyHandler {
                     Ok(None)
                 }
                 KeyCode::Delete => {
-                    self.state.input_remove();
+                    self.ui.input_remove();
                     Ok(None)
                 }
                 KeyCode::Backspace => {
-                    self.state.input_remove_previous();
+                    self.ui.input_remove_previous();
                     Ok(None)
                 }
                 KeyCode::Left => {
-                    self.state.input_move_cursor(CursorMovement::Left);
+                    self.ui.input_move_cursor(CursorMovement::Left);
                     Ok(None)
                 }
                 KeyCode::Right => {
-                    self.state.input_move_cursor(CursorMovement::Right);
+                    self.ui.input_move_cursor(CursorMovement::Right);
                     Ok(None)
                 }
                 KeyCode::Home => {
-                    self.state.input_move_cursor(CursorMovement::Start);
+                    self.ui.input_move_cursor(CursorMovement::Start);
                     Ok(None)
                 }
                 KeyCode::End => {
-                    self.state.input_move_cursor(CursorMovement::End);
+                    self.ui.input_move_cursor(CursorMovement::End);
                     Ok(None)
                 }
                 KeyCode::Up => {
-                    self.state.messages_scroll(ScrollMovement::Up);
+                    self.ui.messages_scroll(ScrollMovement::Up);
                     Ok(None)
                 }
                 KeyCode::Down => {
-                    self.state.messages_scroll(ScrollMovement::Down);
+                    self.ui.messages_scroll(ScrollMovement::Down);
                     Ok(None)
                 }
                 KeyCode::PageUp => {
-                    self.state.messages_scroll(ScrollMovement::Start);
+                    self.ui.messages_scroll(ScrollMovement::Start);
                     Ok(None)
                 }
                 _ => Ok(None),
             },
         };
 
-        self.renderer.render(&mut self.state, &self.theme).unwrap();
+        self.renderer.render(&self.ui, &self.theme).unwrap();
 
         ret
     }
@@ -244,7 +240,7 @@ impl Handler<MyBehaviour, TermInputStream> for MyHandler {
                 },
                 Event::FloodsubEvent(fs_event) => match fs_event {
                     FloodsubEvent::Message(message) => {
-                        self.state.add_message(ChatMessage::new(
+                        self.ui.add_message(ChatMessage::new(
                             message.source,
                             String::from_utf8(message.data).unwrap(),
                         ));
@@ -262,7 +258,7 @@ impl Handler<MyBehaviour, TermInputStream> for MyHandler {
     }
 
     fn update(&mut self) -> Result<(), std::io::Error> {
-        Ok(self.renderer.render(&mut self.state, &self.theme).unwrap())
+        Ok(self.renderer.render(&self.ui, &self.theme).unwrap())
     }
 }
 

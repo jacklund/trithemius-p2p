@@ -1,10 +1,14 @@
-use crate::{config::Theme, state::Window};
+use crate::config::Theme;
+use crossterm::terminal;
+use crossterm::ExecutableCommand;
+use libp2p::PeerId;
 use log::{debug, error, LevelFilter};
 use resize::Type::Lanczos3;
 use resize::{px::RGB, Pixel::RGB8};
+use rgb::RGB8;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::State;
-use super::util::split_each;
+use trithemiuslib::ChatMessage;
 
 use tui::backend::CrosstermBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -12,177 +16,273 @@ use tui::style::{Color, Modifier, Style};
 use tui::text::{Span, Spans};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::Frame;
+use tui::Terminal;
 
+use std::collections::HashMap;
 use std::io::Write;
 
-pub fn draw(
-    frame: &mut Frame<CrosstermBackend<impl Write>>,
-    state: &State,
-    chunk: Rect,
-    theme: &Theme,
-) {
-    debug!("UI::draw called");
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(6)].as_ref())
-        .split(chunk);
+pub enum CursorMovement {
+    Left,
+    Right,
+    Start,
+    End,
+}
 
-    let upper_chunk = chunks[0];
-    if !state.windows.is_empty() {
-        let upper_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(30)].as_ref())
-            .split(upper_chunk);
-        draw_messages_panel(frame, state, upper_chunks[0], theme);
-        draw_video_panel(frame, state, upper_chunks[1]);
-    } else {
-        draw_messages_panel(frame, state, chunks[0], theme);
+pub enum ScrollMovement {
+    Up,
+    Down,
+    Start,
+}
+
+// split messages to fit the width of the ui panel
+pub fn split_each(input: String, width: usize) -> Vec<String> {
+    let mut splitted = Vec::with_capacity(input.width() / width);
+    let mut row = String::new();
+
+    let mut index = 0;
+
+    for current_char in input.chars() {
+        if (index != 0 && index == width) || index + current_char.width().unwrap_or(0) > width {
+            splitted.push(row.drain(..).collect());
+            index = 0;
+        }
+
+        row.push(current_char);
+        index += current_char.width().unwrap_or(0);
     }
-    draw_input_panel(frame, state, chunks[1], theme);
+    // leftover
+    if !row.is_empty() {
+        splitted.push(row.drain(..).collect());
+    }
+    splitted
 }
 
-fn draw_messages_panel(
-    frame: &mut Frame<CrosstermBackend<impl Write>>,
-    state: &State,
-    chunk: Rect,
-    theme: &Theme,
-) {
-    let message_colors = &theme.message_colors;
-
-    let messages = state
-        .messages()
-        .iter()
-        .rev()
-        .map(|message| {
-            let color = match state.get_user_id(&message.user) {
-                Some(id) => message_colors[id % message_colors.len()],
-                None => theme.my_user_color,
-            };
-            let date = message.date.format("%H:%M:%S ").to_string();
-            let mut ui_message = vec![
-                Span::styled(date, Style::default().fg(theme.date_color)),
-                Span::styled(message.user.to_base58(), Style::default().fg(color)),
-                Span::styled(": ", Style::default().fg(color)),
-            ];
-            ui_message.extend(parse_content(&message.message, theme));
-            Spans::from(ui_message)
-        })
-        .collect::<Vec<_>>();
-
-    let messages_panel = Paragraph::new(messages)
-        .block(Block::default().borders(Borders::ALL).title(Span::styled(
-            "LAN Room",
-            Style::default().add_modifier(Modifier::BOLD),
-        )))
-        .style(Style::default().fg(theme.chat_panel_color))
-        .alignment(Alignment::Left)
-        .scroll((state.scroll_messages_view() as u16, 0))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(messages_panel, chunk);
+pub struct Renderer {
+    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
 }
 
-fn parse_content<'a>(content: &'a str, theme: &Theme) -> Vec<Span<'a>> {
-    vec![Span::raw(content)]
-}
+impl Renderer {
+    pub fn new() -> Self {
+        terminal::enable_raw_mode().unwrap();
+        let mut out = std::io::stdout();
+        out.execute(terminal::EnterAlternateScreen).unwrap();
 
-fn draw_input_panel(
-    frame: &mut Frame<CrosstermBackend<impl Write>>,
-    state: &State,
-    chunk: Rect,
-    theme: &Theme,
-) {
-    let inner_width = (chunk.width - 2) as usize;
-
-    let input = state.input().iter().collect::<String>();
-    let input = split_each(input, inner_width)
-        .into_iter()
-        .map(|line| Spans::from(vec![Span::raw(line)]))
-        .collect::<Vec<_>>();
-
-    let input_panel = Paragraph::new(input)
-        .block(Block::default().borders(Borders::ALL).title(Span::styled(
-            "Your message",
-            Style::default().add_modifier(Modifier::BOLD),
-        )))
-        .style(Style::default().fg(theme.input_panel_color))
-        .alignment(Alignment::Left);
-
-    frame.render_widget(input_panel, chunk);
-
-    let input_cursor = state.ui_input_cursor(inner_width);
-    frame.set_cursor(chunk.x + 1 + input_cursor.0, chunk.y + 1 + input_cursor.1)
-}
-
-fn draw_video_panel(frame: &mut Frame<CrosstermBackend<impl Write>>, state: &State, chunk: Rect) {
-    let windows = state.windows.values().collect();
-    let fb = FrameBuffer::new(windows).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(fb, chunk);
-}
-#[derive(Default)]
-struct FrameBuffer<'a> {
-    windows: Vec<&'a Window>,
-    block: Option<Block<'a>>,
-}
-
-impl<'a> FrameBuffer<'a> {
-    fn new(windows: Vec<&'a Window>) -> Self {
         Self {
-            windows,
-            ..Default::default()
+            terminal: Terminal::new(CrosstermBackend::new(out)).unwrap(),
         }
     }
 
-    fn block(mut self, block: Block<'a>) -> FrameBuffer<'a> {
-        self.block = Some(block);
-        self
+    pub fn render(&mut self, ui: &UI, theme: &Theme) -> Result<(), std::io::Error> {
+        self.terminal
+            .draw(|frame| ui.draw(frame, frame.size(), theme))?;
+        Ok(())
     }
 }
 
-impl tui::widgets::Widget for FrameBuffer<'_> {
-    fn render(mut self, area: Rect, buf: &mut tui::buffer::Buffer) {
-        let area = match self.block.take() {
-            Some(b) => {
-                let inner_area = b.inner(area);
-                b.render(area, buf);
-                inner_area
+#[derive(Default)]
+pub struct UI {
+    messages: Vec<ChatMessage>,
+    scroll_messages_view: usize,
+    input: Vec<char>,
+    input_cursor: usize,
+    user_ids: HashMap<PeerId, usize>,
+    last_user_id: usize,
+}
+
+impl UI {
+    pub fn scroll_messages_view(&self) -> usize {
+        self.scroll_messages_view
+    }
+
+    pub fn ui_input_cursor(&self, width: usize) -> (u16, u16) {
+        let mut position = (0, 0);
+
+        for current_char in self.input.iter().take(self.input_cursor) {
+            let char_width = unicode_width::UnicodeWidthChar::width(*current_char).unwrap_or(0);
+
+            position.0 += char_width;
+
+            match position.0.cmp(&width) {
+                std::cmp::Ordering::Equal => {
+                    position.0 = 0;
+                    position.1 += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    // Handle a char with width > 1 at the end of the row
+                    // width - (char_width - 1) accounts for the empty column(s) left behind
+                    position.0 -= width - (char_width - 1);
+                    position.1 += 1;
+                }
+                _ => (),
             }
-            None => area,
-        };
+        }
 
-        let windows_num = self.windows.len();
-        let window_height = area.height / windows_num as u16;
-        let y_start = area.y;
-        for (idx, window) in self.windows.iter().enumerate() {
-            let area = Rect::new(
-                area.x,
-                y_start + window_height * idx as u16,
-                area.width,
-                window_height,
-            );
+        (position.0 as u16, position.1 as u16)
+    }
 
-            let mut resizer = resize::new(
-                window.width / 2,
-                window.height,
-                area.width as usize,
-                area.height as usize,
-                RGB8,
-                Lanczos3,
-            )
-            .unwrap();
-            let mut dst = vec![RGB::new(0, 0, 0); (area.width * area.height) as usize];
-            resizer.resize(&window.data, &mut dst).unwrap();
+    pub fn new_user(&mut self, peer_id: PeerId) {
+        self.user_ids.insert(peer_id, self.last_user_id);
+        self.last_user_id += 1;
+    }
 
-            let mut dst = dst.iter();
-            for j in area.y..area.y + area.height {
-                for i in area.x..area.x + area.width {
-                    let rgb = dst.next().unwrap();
-                    let r = rgb.r;
-                    let g = rgb.g;
-                    let b = rgb.b;
-                    buf.get_mut(i, j).set_bg(Color::Rgb(r, g, b));
+    pub fn get_user_id(&self, peer_id: &PeerId) -> Option<usize> {
+        self.user_ids.get(peer_id).cloned()
+    }
+
+    pub fn input_write(&mut self, character: char) {
+        self.input.insert(self.input_cursor, character);
+        self.input_cursor += 1;
+    }
+
+    pub fn input_remove(&mut self) {
+        if self.input_cursor < self.input.len() {
+            self.input.remove(self.input_cursor);
+        }
+    }
+
+    pub fn input_remove_previous(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor -= 1;
+            self.input.remove(self.input_cursor);
+        }
+    }
+
+    pub fn input_move_cursor(&mut self, movement: CursorMovement) {
+        match movement {
+            CursorMovement::Left => {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
                 }
             }
+            CursorMovement::Right => {
+                if self.input_cursor < self.input.len() {
+                    self.input_cursor += 1;
+                }
+            }
+            CursorMovement::Start => {
+                self.input_cursor = 0;
+            }
+            CursorMovement::End => {
+                self.input_cursor = self.input.len();
+            }
         }
+    }
+
+    pub fn messages_scroll(&mut self, movement: ScrollMovement) {
+        match movement {
+            ScrollMovement::Up => {
+                if self.scroll_messages_view > 0 {
+                    self.scroll_messages_view -= 1;
+                }
+            }
+            ScrollMovement::Down => {
+                self.scroll_messages_view += 1;
+            }
+            ScrollMovement::Start => {
+                self.scroll_messages_view += 0;
+            }
+        }
+    }
+
+    pub fn reset_input(&mut self) -> Option<String> {
+        if !self.input.is_empty() {
+            self.input_cursor = 0;
+            return Some(self.input.drain(..).collect());
+        }
+        None
+    }
+
+    pub fn add_message(&mut self, message: ChatMessage) {
+        self.messages.push(message);
+    }
+
+    pub fn draw(
+        &self,
+        frame: &mut Frame<CrosstermBackend<impl Write>>,
+        chunk: Rect,
+        theme: &Theme,
+    ) {
+        debug!("UI::draw called");
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(6)].as_ref())
+            .split(chunk);
+
+        let upper_chunk = chunks[0];
+        self.draw_messages_panel(frame, chunks[0], theme);
+        self.draw_input_panel(frame, chunks[1], theme);
+    }
+
+    fn draw_messages_panel(
+        &self,
+        frame: &mut Frame<CrosstermBackend<impl Write>>,
+        chunk: Rect,
+        theme: &Theme,
+    ) {
+        let message_colors = &theme.message_colors;
+
+        let messages = self
+            .messages
+            .iter()
+            .rev()
+            .map(|message| {
+                let color = match self.get_user_id(&message.user) {
+                    Some(id) => message_colors[id % message_colors.len()],
+                    None => theme.my_user_color,
+                };
+                let date = message.date.format("%H:%M:%S ").to_string();
+                let mut ui_message = vec![
+                    Span::styled(date, Style::default().fg(theme.date_color)),
+                    Span::styled(message.user.to_base58(), Style::default().fg(color)),
+                    Span::styled(": ", Style::default().fg(color)),
+                ];
+                ui_message.extend(Self::parse_content(&message.message, theme));
+                Spans::from(ui_message)
+            })
+            .collect::<Vec<_>>();
+
+        let messages_panel = Paragraph::new(messages)
+            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                "LAN Room",
+                Style::default().add_modifier(Modifier::BOLD),
+            )))
+            .style(Style::default().fg(theme.chat_panel_color))
+            .alignment(Alignment::Left)
+            .scroll((self.scroll_messages_view() as u16, 0))
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(messages_panel, chunk);
+    }
+
+    fn parse_content<'a>(content: &'a str, theme: &Theme) -> Vec<Span<'a>> {
+        vec![Span::raw(content)]
+    }
+
+    fn draw_input_panel(
+        &self,
+        frame: &mut Frame<CrosstermBackend<impl Write>>,
+        chunk: Rect,
+        theme: &Theme,
+    ) {
+        let inner_width = (chunk.width - 2) as usize;
+
+        let input = self.input.iter().collect::<String>();
+        let input = split_each(input, inner_width)
+            .into_iter()
+            .map(|line| Spans::from(vec![Span::raw(line)]))
+            .collect::<Vec<_>>();
+
+        let input_panel = Paragraph::new(input)
+            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                "Your message",
+                Style::default().add_modifier(Modifier::BOLD),
+            )))
+            .style(Style::default().fg(theme.input_panel_color))
+            .alignment(Alignment::Left);
+
+        frame.render_widget(input_panel, chunk);
+
+        let input_cursor = self.ui_input_cursor(inner_width);
+        frame.set_cursor(chunk.x + 1 + input_cursor.0, chunk.y + 1 + input_cursor.1)
     }
 }
