@@ -123,6 +123,8 @@ impl Handler<MyBehaviour, TermInputStream> for MyHandler {
         engine: &mut Engine<MyBehaviour>,
         event: Result<Self::Event, std::io::Error>,
     ) -> Result<Option<EngineEvent>, std::io::Error> {
+        // TODO: Delegate event to UI, and have it return EngineEvent to, e.g., publish
+        // a message
         let ret = match event? {
             TermEvent::Mouse(_) => Ok(None),
             TermEvent::Resize(_, _) => Ok(None),
