@@ -5,6 +5,7 @@ use crate::util::Result;
 
 use crossterm::terminal::{self};
 use crossterm::ExecutableCommand;
+use log::{debug, error, LevelFilter};
 
 use tui::backend::CrosstermBackend;
 use tui::Terminal;
@@ -15,6 +16,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
+        debug!("New renderer");
         terminal::enable_raw_mode().unwrap();
         let mut out = std::io::stdout();
         out.execute(terminal::EnterAlternateScreen).unwrap();
@@ -25,6 +27,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, state: &State, theme: &Theme) -> Result<()> {
+        debug!("Called Renderer::render");
         self.terminal
             .draw(|frame| ui::draw(frame, state, frame.size(), theme))?;
         Ok(())

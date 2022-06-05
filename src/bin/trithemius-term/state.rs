@@ -1,38 +1,9 @@
 use chrono::{DateTime, Local};
 use libp2p::PeerId;
 use rgb::RGB8;
+use trithemiuslib::ChatMessage;
 
 use std::collections::HashMap;
-
-#[derive(PartialEq)]
-pub enum SystemMessageType {
-    Info,
-    Warning,
-    Error,
-}
-
-pub enum MessageType {
-    Connection,
-    Disconnection,
-    Text(String),
-    System(String, SystemMessageType),
-}
-
-pub struct ChatMessage {
-    pub date: DateTime<Local>,
-    pub user: String,
-    pub message_type: MessageType,
-}
-
-impl ChatMessage {
-    pub fn new(user: String, message_type: MessageType) -> ChatMessage {
-        ChatMessage {
-            date: Local::now(),
-            user,
-            message_type,
-        }
-    }
-}
 
 pub struct Window {
     pub data: Vec<RGB8>,
@@ -54,8 +25,7 @@ pub struct State {
     scroll_messages_view: usize,
     input: Vec<char>,
     input_cursor: usize,
-    lan_users: HashMap<PeerId, String>,
-    users_id: HashMap<String, usize>,
+    user_ids: HashMap<PeerId, usize>,
     last_user_id: usize,
     pub stop_stream: bool,
     pub windows: HashMap<PeerId, Window>,
@@ -113,33 +83,13 @@ impl State {
         (position.0 as u16, position.1 as u16)
     }
 
-    pub fn user_name(&self, peer: PeerId) -> Option<&String> {
-        self.lan_users.get(&peer)
-    }
-
-    pub fn all_user_endpoints(&self) -> impl Iterator<Item = &PeerId> {
-        self.lan_users.keys()
-    }
-
-    pub fn users_id(&self) -> &HashMap<String, usize> {
-        &self.users_id
-    }
-
-    pub fn connected_user(&mut self, peer: PeerId, user: &str) {
-        self.lan_users.insert(peer, user.into());
-        if !self.users_id.contains_key(user) {
-            self.users_id.insert(user.into(), self.last_user_id);
-        }
+    pub fn new_user(&mut self, peer_id: PeerId) {
+        self.user_ids.insert(peer_id, self.last_user_id);
         self.last_user_id += 1;
-        self.add_message(ChatMessage::new(user.into(), MessageType::Connection));
     }
 
-    pub fn disconnected_user(&mut self, peer: PeerId) {
-        if self.lan_users.contains_key(&peer) {
-            // unwrap is safe because of the check above
-            let user = self.lan_users.remove(&peer).unwrap();
-            self.add_message(ChatMessage::new(user, MessageType::Disconnection));
-        }
+    pub fn get_user_id(&self, peer_id: &PeerId) -> Option<usize> {
+        self.user_ids.get(peer_id).cloned()
     }
 
     pub fn input_write(&mut self, character: char) {
@@ -206,24 +156,6 @@ impl State {
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
-        self.messages.push(message);
-    }
-
-    pub fn add_system_warn_message(&mut self, content: String) {
-        let message_type = MessageType::System(content, SystemMessageType::Warning);
-        let message = ChatMessage::new("Termchat: ".into(), message_type);
-        self.messages.push(message);
-    }
-
-    pub fn add_system_info_message(&mut self, content: String) {
-        let message_type = MessageType::System(content, SystemMessageType::Info);
-        let message = ChatMessage::new("Termchat: ".into(), message_type);
-        self.messages.push(message);
-    }
-
-    pub fn add_system_error_message(&mut self, content: String) {
-        let message_type = MessageType::System(content, SystemMessageType::Error);
-        let message = ChatMessage::new("Termchat: ".into(), message_type);
         self.messages.push(message);
     }
 

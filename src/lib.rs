@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Local};
+use futures::stream::FusedStream;
 use libp2p::{
     core::{connection::ListenerId, muxing::StreamMuxerBox, transport::Boxed, upgrade},
     futures::StreamExt,
@@ -15,7 +17,29 @@ use libp2p::{
     Transport,
     TransportError,
 };
-use tokio::io;
+
+pub struct ChatMessage {
+    pub date: DateTime<Local>,
+    pub user: PeerId,
+    pub message: String,
+}
+
+impl ChatMessage {
+    pub fn new(user: PeerId, message: String) -> ChatMessage {
+        ChatMessage {
+            date: Local::now(),
+            user,
+            message,
+        }
+    }
+}
+
+pub enum EngineEvent {
+    ChatMessage(ChatMessage),
+    UserConnected(PeerId),
+    UserDisconnected(PeerId),
+    Shutdown,
+}
 
 pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
     // Create a keypair for authenticated encryption of the transport.
@@ -32,16 +56,16 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
 }
 
 #[async_trait]
-pub trait InputHandler<B: NetworkBehaviour> {
+pub trait InputHandler<B: NetworkBehaviour, F: FusedStream> {
     type Event;
-
-    async fn get_input(&mut self) -> Option<io::Result<Self::Event>>;
 
     fn handle_input(
         &mut self,
         engine: &mut Engine<B>,
-        line: Option<Self::Event>,
-    ) -> Result<(), std::io::Error>;
+        line: F::Item,
+    ) -> Result<Option<EngineEvent>, std::io::Error>;
+
+    fn handle_network_message(&mut self, chat_message: ChatMessage) -> Result<(), std::io::Error>;
 }
 
 pub trait EventHandler<B: NetworkBehaviour> {
@@ -49,7 +73,7 @@ pub trait EventHandler<B: NetworkBehaviour> {
         &mut self,
         engine: &mut Engine<B>,
         event: SwarmEvent<B::OutEvent, <<<B as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler as ConnectionHandler>::Error>,
-    ) -> Result<(), std::io::Error>;
+    ) -> Result<Option<EngineEvent>, std::io::Error>;
 }
 
 pub struct Engine<B: NetworkBehaviour> {
@@ -87,18 +111,30 @@ where
         &mut self.swarm
     }
 
-    pub async fn run<I: InputHandler<B>, E: EventHandler<B>>(
+    pub async fn run<
+        F: FusedStream + std::marker::Unpin,
+        I: InputHandler<B, F>,
+        E: EventHandler<B>,
+    >(
         &mut self,
+        mut input_stream: F,
         mut input_handler: I,
         mut event_handler: E,
     ) -> Result<(), std::io::Error> {
         loop {
             tokio::select! {
-                line = input_handler.get_input() => {
-                    input_handler.handle_input(self, line.transpose()?)?;
+                line = input_stream.select_next_some() => {
+                    match input_handler.handle_input(self, line)? {
+                        Some(EngineEvent::Shutdown) => break Ok(()),
+                        _ => (),
+                    }
                 },
                 event = self.swarm().select_next_some() => {
-                    event_handler.handle_event(self, event)?;
+                    match event_handler.handle_event(self, event)? {
+                        Some(EngineEvent::ChatMessage(chat_message)) => input_handler.handle_network_message(chat_message)?,
+                        Some(_) => (),
+                        None => (),
+                    }
                 }
             }
         }

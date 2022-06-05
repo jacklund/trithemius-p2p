@@ -12,7 +12,7 @@ use libp2p::{
     PeerId,
 };
 use tokio::io::{self, AsyncBufReadExt};
-use trithemiuslib::{create_transport, Engine, EventHandler, InputHandler};
+use trithemiuslib::{create_transport, Engine, EngineEvent, EventHandler, InputHandler};
 use void;
 
 #[derive(Debug)]
@@ -87,7 +87,7 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
             Event,
             EitherError<EitherError<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>, Failure>,
         >,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<Option<EngineEvent>, std::io::Error> {
         println!("Event: {:?}", event);
         match event {
             SwarmEvent::Behaviour(behaviour_event) => match behaviour_event {
@@ -135,7 +135,7 @@ impl EventHandler<MyBehaviour> for MyEventHandler {
             _ => (),
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -147,11 +147,19 @@ impl InputHandler<MyBehaviour> for StdinHandler {
         self.stdin.next_line().await.transpose()
     }
 
+    fn handle_network_message(
+        &mut self,
+        peer_id: PeerId,
+        message: String,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
     fn handle_input(
         &mut self,
         engine: &mut Engine<MyBehaviour>,
         line: Option<Self::Event>,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<Option<EngineEvent>, std::io::Error> {
         match line {
             Some(string) => {
                 engine
@@ -159,13 +167,13 @@ impl InputHandler<MyBehaviour> for StdinHandler {
                     .behaviour_mut()
                     .floodsub
                     .publish(self.floodsub_topic.clone(), string.as_bytes());
-                Ok(())
+                Ok(None)
             }
 
             // Ctrl-d
             None => {
                 eprintln!("stdin closed");
-                Ok(())
+                Ok(None)
             }
         }
     }

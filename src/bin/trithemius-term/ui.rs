@@ -1,8 +1,9 @@
 use crate::{config::Theme, state::Window};
+use log::{debug, error, LevelFilter};
 use resize::Type::Lanczos3;
 use resize::{px::RGB, Pixel::RGB8};
 
-use super::state::{MessageType, State, SystemMessageType};
+use super::state::State;
 use super::util::split_each;
 
 use tui::backend::CrosstermBackend;
@@ -20,6 +21,7 @@ pub fn draw(
     chunk: Rect,
     theme: &Theme,
 ) {
+    debug!("UI::draw called");
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(6)].as_ref())
@@ -52,45 +54,18 @@ fn draw_messages_panel(
         .iter()
         .rev()
         .map(|message| {
-            let color = if let Some(id) = state.users_id().get(&message.user) {
-                message_colors[id % message_colors.len()]
-            } else {
-                theme.my_user_color
+            let color = match state.get_user_id(&message.user) {
+                Some(id) => message_colors[id % message_colors.len()],
+                None => theme.my_user_color,
             };
             let date = message.date.format("%H:%M:%S ").to_string();
-            match &message.message_type {
-                MessageType::Connection => Spans::from(vec![
-                    Span::styled(date, Style::default().fg(theme.date_color)),
-                    Span::styled(&message.user, Style::default().fg(color)),
-                    Span::styled(" is online", Style::default().fg(color)),
-                ]),
-                MessageType::Disconnection => Spans::from(vec![
-                    Span::styled(date, Style::default().fg(theme.date_color)),
-                    Span::styled(&message.user, Style::default().fg(color)),
-                    Span::styled(" is offline", Style::default().fg(color)),
-                ]),
-                MessageType::Text(content) => {
-                    let mut ui_message = vec![
-                        Span::styled(date, Style::default().fg(theme.date_color)),
-                        Span::styled(&message.user, Style::default().fg(color)),
-                        Span::styled(": ", Style::default().fg(color)),
-                    ];
-                    ui_message.extend(parse_content(content, theme));
-                    Spans::from(ui_message)
-                }
-                MessageType::System(content, msg_type) => {
-                    let (user_color, content_color) = match msg_type {
-                        SystemMessageType::Info => theme.system_info_color,
-                        SystemMessageType::Warning => theme.system_warning_color,
-                        SystemMessageType::Error => theme.system_error_color,
-                    };
-                    Spans::from(vec![
-                        Span::styled(date, Style::default().fg(theme.date_color)),
-                        Span::styled(&message.user, Style::default().fg(user_color)),
-                        Span::styled(content, Style::default().fg(content_color)),
-                    ])
-                }
-            }
+            let mut ui_message = vec![
+                Span::styled(date, Style::default().fg(theme.date_color)),
+                Span::styled(message.user.to_base58(), Style::default().fg(color)),
+                Span::styled(": ", Style::default().fg(color)),
+            ];
+            ui_message.extend(parse_content(&message.message, theme));
+            Spans::from(ui_message)
         })
         .collect::<Vec<_>>();
 
