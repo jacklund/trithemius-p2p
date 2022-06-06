@@ -1,10 +1,10 @@
 mod config;
 mod ui;
 
-use crate::ui::{CursorMovement, Renderer, ScrollMovement, UI};
+use crate::ui::{Renderer, UI};
 use async_trait::async_trait;
-use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
-use futures::{future::FutureExt, select, task::Poll};
+use crossterm::event::{Event as TermEvent, EventStream};
+use futures::task::Poll;
 use futures_lite::stream::StreamExt;
 use libp2p::{
     core::either::EitherError,
@@ -18,10 +18,9 @@ use libp2p::{
     NetworkBehaviour,
     PeerId,
 };
-use log::{debug, error, LevelFilter};
+use log::debug;
 use std::pin::Pin;
 use std::task::Context;
-use tokio::io::{self, AsyncBufReadExt};
 use trithemiuslib::{create_transport, ChatMessage, Engine, EngineEvent, Handler};
 
 #[derive(Debug)]
@@ -99,7 +98,7 @@ struct MyHandler {
 
 impl MyHandler {
     fn new(my_identity: PeerId, floodsub_topic: floodsub::Topic) -> Self {
-        let ui = UI::default();
+        let ui = UI::new(my_identity);
         let theme = config::Theme::default();
         let mut renderer = Renderer::new();
         renderer.render(&ui, &theme).unwrap();
@@ -123,77 +122,18 @@ impl Handler<MyBehaviour, TermInputStream> for MyHandler {
         engine: &mut Engine<MyBehaviour>,
         event: Result<Self::Event, std::io::Error>,
     ) -> Result<Option<EngineEvent>, std::io::Error> {
-        // TODO: Delegate event to UI, and have it return EngineEvent to, e.g., publish
-        // a message
-        let ret = match event? {
-            TermEvent::Mouse(_) => Ok(None),
-            TermEvent::Resize(_, _) => Ok(None),
-            TermEvent::Key(KeyEvent { code, modifiers }) => match code {
-                KeyCode::Esc => Ok(Some(EngineEvent::Shutdown)),
-                KeyCode::Char(character) => {
-                    if character == 'c' && modifiers.contains(KeyModifiers::CONTROL) {
-                        Ok(Some(EngineEvent::Shutdown))
-                    } else {
-                        self.ui.input_write(character);
-                        Ok(None)
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Some(input) = self.ui.reset_input() {
-                        let message = ChatMessage::new(self.my_identity, input.clone());
-                        self.ui.add_message(message);
-
-                        engine
-                            .swarm()
-                            .behaviour_mut()
-                            .floodsub
-                            .publish(self.floodsub_topic.clone(), input.as_bytes());
-                    }
-                    Ok(None)
-                }
-                KeyCode::Delete => {
-                    self.ui.input_remove();
-                    Ok(None)
-                }
-                KeyCode::Backspace => {
-                    self.ui.input_remove_previous();
-                    Ok(None)
-                }
-                KeyCode::Left => {
-                    self.ui.input_move_cursor(CursorMovement::Left);
-                    Ok(None)
-                }
-                KeyCode::Right => {
-                    self.ui.input_move_cursor(CursorMovement::Right);
-                    Ok(None)
-                }
-                KeyCode::Home => {
-                    self.ui.input_move_cursor(CursorMovement::Start);
-                    Ok(None)
-                }
-                KeyCode::End => {
-                    self.ui.input_move_cursor(CursorMovement::End);
-                    Ok(None)
-                }
-                KeyCode::Up => {
-                    self.ui.messages_scroll(ScrollMovement::Up);
-                    Ok(None)
-                }
-                KeyCode::Down => {
-                    self.ui.messages_scroll(ScrollMovement::Down);
-                    Ok(None)
-                }
-                KeyCode::PageUp => {
-                    self.ui.messages_scroll(ScrollMovement::Start);
-                    Ok(None)
-                }
-                _ => Ok(None),
-            },
-        };
-
-        self.renderer.render(&self.ui, &self.theme).unwrap();
-
-        ret
+        let event = self.ui.handle_input_event(event?)?;
+        match event {
+            Some(EngineEvent::ChatMessage(ref message)) => {
+                engine
+                    .swarm()
+                    .behaviour_mut()
+                    .floodsub
+                    .publish(self.floodsub_topic.clone(), message.message.as_bytes());
+                Ok(event)
+            }
+            _ => Ok(event),
+        }
     }
 
     fn handle_event(

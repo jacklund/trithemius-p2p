@@ -1,18 +1,16 @@
 use crate::config::Theme;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use libp2p::PeerId;
-use log::{debug, error, LevelFilter};
-use resize::Type::Lanczos3;
-use resize::{px::RGB, Pixel::RGB8};
-use rgb::RGB8;
+use log::debug;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use trithemiuslib::ChatMessage;
+use trithemiuslib::{ChatMessage, EngineEvent};
 
 use tui::backend::CrosstermBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use tui::style::{Color, Modifier, Style};
+use tui::style::{Modifier, Style};
 use tui::text::{Span, Spans};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::Frame;
@@ -79,8 +77,8 @@ impl Renderer {
     }
 }
 
-#[derive(Default)]
 pub struct UI {
+    my_identity: PeerId,
     messages: Vec<ChatMessage>,
     scroll_messages_view: usize,
     input: Vec<char>,
@@ -90,6 +88,18 @@ pub struct UI {
 }
 
 impl UI {
+    pub fn new(my_identity: PeerId) -> Self {
+        Self {
+            my_identity,
+            messages: Vec::new(),
+            scroll_messages_view: 0,
+            input: Vec::new(),
+            input_cursor: 0,
+            user_ids: HashMap::new(),
+            last_user_id: 0,
+        }
+    }
+
     pub fn scroll_messages_view(&self) -> usize {
         self.scroll_messages_view
     }
@@ -118,6 +128,73 @@ impl UI {
         }
 
         (position.0 as u16, position.1 as u16)
+    }
+
+    pub fn handle_input_event(
+        &mut self,
+        event: Event,
+    ) -> Result<Option<EngineEvent>, std::io::Error> {
+        match event {
+            Event::Mouse(_) => Ok(None),
+            Event::Resize(_, _) => Ok(None),
+            Event::Key(KeyEvent { code, modifiers }) => match code {
+                KeyCode::Esc => Ok(Some(EngineEvent::Shutdown)),
+                KeyCode::Char(character) => {
+                    if character == 'c' && modifiers.contains(KeyModifiers::CONTROL) {
+                        Ok(Some(EngineEvent::Shutdown))
+                    } else {
+                        self.input_write(character);
+                        Ok(None)
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(input) = self.reset_input() {
+                        let message = ChatMessage::new(self.my_identity, input.clone());
+                        self.add_message(message.clone());
+                        Ok(Some(EngineEvent::ChatMessage(message)))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                KeyCode::Delete => {
+                    self.input_remove();
+                    Ok(None)
+                }
+                KeyCode::Backspace => {
+                    self.input_remove_previous();
+                    Ok(None)
+                }
+                KeyCode::Left => {
+                    self.input_move_cursor(CursorMovement::Left);
+                    Ok(None)
+                }
+                KeyCode::Right => {
+                    self.input_move_cursor(CursorMovement::Right);
+                    Ok(None)
+                }
+                KeyCode::Home => {
+                    self.input_move_cursor(CursorMovement::Start);
+                    Ok(None)
+                }
+                KeyCode::End => {
+                    self.input_move_cursor(CursorMovement::End);
+                    Ok(None)
+                }
+                KeyCode::Up => {
+                    self.messages_scroll(ScrollMovement::Up);
+                    Ok(None)
+                }
+                KeyCode::Down => {
+                    self.messages_scroll(ScrollMovement::Down);
+                    Ok(None)
+                }
+                KeyCode::PageUp => {
+                    self.messages_scroll(ScrollMovement::Start);
+                    Ok(None)
+                }
+                _ => Ok(None),
+            },
+        }
     }
 
     pub fn new_user(&mut self, peer_id: PeerId) {

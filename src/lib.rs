@@ -18,6 +18,7 @@ use libp2p::{
     TransportError,
 };
 
+#[derive(Clone)]
 pub struct ChatMessage {
     pub date: DateTime<Local>,
     pub user: PeerId,
