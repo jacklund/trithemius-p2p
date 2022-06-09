@@ -317,9 +317,11 @@ impl UI {
                     None => theme.my_user_color,
                 };
                 let date = message.date.format("%H:%M:%S ").to_string();
+                let long_username = message.user.to_base58();
+                let short_username = long_username[long_username.len() - 7..].to_string();
                 let mut ui_message = vec![
                     Span::styled(date, Style::default().fg(theme.date_color)),
-                    Span::styled(message.user.to_base58(), Style::default().fg(color)),
+                    Span::styled(short_username, Style::default().fg(color)),
                     Span::styled(": ", Style::default().fg(color)),
                 ];
                 ui_message.extend(Self::parse_content(&message.message, theme));
