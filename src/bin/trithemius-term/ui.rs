@@ -77,6 +77,16 @@ impl Renderer {
     }
 }
 
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        self.terminal
+            .backend_mut()
+            .execute(terminal::LeaveAlternateScreen)
+            .expect("Could not execute LeaveAlternateScreen");
+        terminal::disable_raw_mode().expect("Failed disabling raw mode");
+    }
+}
+
 pub struct UI {
     my_identity: PeerId,
     messages: Vec<ChatMessage>,
