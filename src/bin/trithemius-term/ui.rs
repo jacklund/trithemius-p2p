@@ -311,7 +311,6 @@ impl UI {
         let messages = self
             .messages
             .iter()
-            .rev()
             .map(|message| {
                 let color = match self.get_user_id(&message.user) {
                     Some(id) => message_colors[id % message_colors.len()],
