@@ -186,7 +186,7 @@ impl Engine {
                             debug!("Got shutdown");
                             break Ok(());
                         }
-                        _ => { () },
+                        _ => { },
                     }
                 },
                 event = self.swarm().select_next_some() => {

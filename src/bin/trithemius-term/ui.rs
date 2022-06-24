@@ -160,7 +160,7 @@ impl UI {
                 "subscribe" => {
                     match command_args.next() {
                         Some(topic_name) => {
-                            engine.subscribe(topic_name);
+                            engine.subscribe(topic_name); // TODO: Handle error
                             Ok(None)
                         }
                         None => Ok(None), // TODO: Error
@@ -193,14 +193,14 @@ impl UI {
                 }
                 KeyCode::Enter => {
                     if let Some(input) = self.reset_input() {
-                        if input.starts_with("/") {
-                            self.handle_command(engine, input[1..].split_whitespace())
+                        if let Some(command) = input.strip_prefix('/') {
+                            self.handle_command(engine, command.split_whitespace())
                         } else {
                             let message = ChatMessage::new(self.my_identity, input.clone());
                             self.add_message(message.clone());
                             Ok(Some(InputEvent::Message {
-                                topic: IdentTopic::new("chat"),
-                                message: message.message.clone().into_bytes(),
+                                topic: IdentTopic::new("chat"), // TODO: Change this
+                                message: input.into_bytes(),
                             }))
                         }
                     } else {
@@ -371,7 +371,7 @@ impl UI {
         frame.render_widget(messages_panel, chunk);
     }
 
-    fn parse_content<'a>(content: &'a str) -> Vec<Span<'a>> {
+    fn parse_content(content: &str) -> Vec<Span> {
         vec![Span::raw(content)]
     }
 
