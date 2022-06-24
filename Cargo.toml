@@ -7,10 +7,6 @@ edition = "2021"
 name = "trithemiuslib"
 path = "src/lib.rs"
 
-[[bin]]
-name = "trithemius"
-path = "src/bin.rs"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

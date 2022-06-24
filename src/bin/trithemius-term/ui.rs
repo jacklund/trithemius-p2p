@@ -1,15 +1,16 @@
-use crate::config::Theme;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
+use libp2p::gossipsub::IdentTopic;
 use libp2p::PeerId;
 use log::debug;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use trithemiuslib::{ChatMessage, EngineEvent};
+use trithemiuslib::{engine_event::EngineEvent, ChatMessage, Engine, InputEvent};
 
 use tui::backend::CrosstermBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use tui::style::Color;
 use tui::style::{Modifier, Style};
 use tui::text::{Span, Spans};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -70,9 +71,8 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, ui: &UI, theme: &Theme) -> Result<(), std::io::Error> {
-        self.terminal
-            .draw(|frame| ui.draw(frame, frame.size(), theme))?;
+    pub fn render(&mut self, ui: &UI) -> Result<(), std::io::Error> {
+        self.terminal.draw(|frame| ui.draw(frame, frame.size()))?;
         Ok(())
     }
 }
@@ -95,6 +95,11 @@ pub struct UI {
     input_cursor: usize,
     user_ids: HashMap<PeerId, usize>,
     last_user_id: usize,
+    message_colors: Vec<Color>,
+    my_user_color: Color,
+    date_color: Color,
+    chat_panel_color: Color,
+    input_panel_color: Color,
 }
 
 impl UI {
@@ -107,6 +112,11 @@ impl UI {
             input_cursor: 0,
             user_ids: HashMap::new(),
             last_user_id: 0,
+            message_colors: vec![Color::Blue, Color::Yellow, Color::Cyan, Color::Magenta],
+            my_user_color: Color::Green,
+            date_color: Color::DarkGray,
+            chat_panel_color: Color::White,
+            input_panel_color: Color::White,
         }
     }
 
@@ -140,18 +150,42 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
+    fn handle_command<'a, I: Iterator<Item = &'a str>>(
+        &self,
+        engine: &mut Engine,
+        mut command_args: I,
+    ) -> Result<Option<InputEvent>, std::io::Error> {
+        match command_args.next() {
+            Some(command) => match command.to_ascii_lowercase().as_str() {
+                "subscribe" => {
+                    match command_args.next() {
+                        Some(topic_name) => {
+                            engine.subscribe(topic_name);
+                            Ok(None)
+                        }
+                        None => Ok(None), // TODO: Error
+                    }
+                }
+                _ => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+
     pub fn handle_input_event(
         &mut self,
+        engine: &mut Engine,
         event: Event,
-    ) -> Result<Option<EngineEvent>, std::io::Error> {
+    ) -> Result<Option<InputEvent>, std::io::Error> {
+        debug!("Got input event {:?}", event);
         match event {
             Event::Mouse(_) => Ok(None),
             Event::Resize(_, _) => Ok(None),
             Event::Key(KeyEvent { code, modifiers }) => match code {
-                KeyCode::Esc => Ok(Some(EngineEvent::Shutdown)),
+                KeyCode::Esc => Ok(Some(InputEvent::Shutdown)),
                 KeyCode::Char(character) => {
                     if character == 'c' && modifiers.contains(KeyModifiers::CONTROL) {
-                        Ok(Some(EngineEvent::Shutdown))
+                        Ok(Some(InputEvent::Shutdown))
                     } else {
                         self.input_write(character);
                         Ok(None)
@@ -159,9 +193,16 @@ impl UI {
                 }
                 KeyCode::Enter => {
                     if let Some(input) = self.reset_input() {
-                        let message = ChatMessage::new(self.my_identity, input.clone());
-                        self.add_message(message.clone());
-                        Ok(Some(EngineEvent::ChatMessage(message)))
+                        if input.starts_with("/") {
+                            self.handle_command(engine, input[1..].split_whitespace())
+                        } else {
+                            let message = ChatMessage::new(self.my_identity, input.clone());
+                            self.add_message(message.clone());
+                            Ok(Some(InputEvent::Message {
+                                topic: IdentTopic::new("chat"),
+                                message: message.message.clone().into_bytes(),
+                            }))
+                        }
                     } else {
                         Ok(None)
                     }
@@ -283,12 +324,7 @@ impl UI {
         self.messages.push(message);
     }
 
-    pub fn draw(
-        &self,
-        frame: &mut Frame<CrosstermBackend<impl Write>>,
-        chunk: Rect,
-        theme: &Theme,
-    ) {
+    pub fn draw(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         debug!("UI::draw called");
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -296,35 +332,28 @@ impl UI {
             .split(chunk);
 
         let upper_chunk = chunks[0];
-        self.draw_messages_panel(frame, chunks[0], theme);
-        self.draw_input_panel(frame, chunks[1], theme);
+        self.draw_messages_panel(frame, chunks[0]);
+        self.draw_input_panel(frame, chunks[1]);
     }
 
-    fn draw_messages_panel(
-        &self,
-        frame: &mut Frame<CrosstermBackend<impl Write>>,
-        chunk: Rect,
-        theme: &Theme,
-    ) {
-        let message_colors = &theme.message_colors;
-
+    fn draw_messages_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         let messages = self
             .messages
             .iter()
             .map(|message| {
                 let color = match self.get_user_id(&message.user) {
-                    Some(id) => message_colors[id % message_colors.len()],
-                    None => theme.my_user_color,
+                    Some(id) => self.message_colors[id % self.message_colors.len()],
+                    None => self.my_user_color,
                 };
                 let date = message.date.format("%H:%M:%S ").to_string();
                 let long_username = message.user.to_base58();
                 let short_username = long_username[long_username.len() - 7..].to_string();
                 let mut ui_message = vec![
-                    Span::styled(date, Style::default().fg(theme.date_color)),
+                    Span::styled(date, Style::default().fg(self.date_color)),
                     Span::styled(short_username, Style::default().fg(color)),
                     Span::styled(": ", Style::default().fg(color)),
                 ];
-                ui_message.extend(Self::parse_content(&message.message, theme));
+                ui_message.extend(Self::parse_content(&message.message));
                 Spans::from(ui_message)
             })
             .collect::<Vec<_>>();
@@ -334,7 +363,7 @@ impl UI {
                 "LAN Room",
                 Style::default().add_modifier(Modifier::BOLD),
             )))
-            .style(Style::default().fg(theme.chat_panel_color))
+            .style(Style::default().fg(self.chat_panel_color))
             .alignment(Alignment::Left)
             .scroll((self.scroll_messages_view() as u16, 0))
             .wrap(Wrap { trim: false });
@@ -342,16 +371,11 @@ impl UI {
         frame.render_widget(messages_panel, chunk);
     }
 
-    fn parse_content<'a>(content: &'a str, theme: &Theme) -> Vec<Span<'a>> {
+    fn parse_content<'a>(content: &'a str) -> Vec<Span<'a>> {
         vec![Span::raw(content)]
     }
 
-    fn draw_input_panel(
-        &self,
-        frame: &mut Frame<CrosstermBackend<impl Write>>,
-        chunk: Rect,
-        theme: &Theme,
-    ) {
+    fn draw_input_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         let inner_width = (chunk.width - 2) as usize;
 
         let input = self.input.iter().collect::<String>();
@@ -365,7 +389,7 @@ impl UI {
                 "Your message",
                 Style::default().add_modifier(Modifier::BOLD),
             )))
-            .style(Style::default().fg(theme.input_panel_color))
+            .style(Style::default().fg(self.input_panel_color))
             .alignment(Alignment::Left);
 
         frame.render_widget(input_panel, chunk);
