@@ -1,3 +1,5 @@
+use chrono::{DateTime, Local};
+use clap::{crate_name, crate_version};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
@@ -19,6 +21,21 @@ use tui::Terminal;
 
 use std::collections::HashMap;
 use std::io::Write;
+
+enum Level {
+    Info,
+    Warning,
+    Error,
+}
+
+enum Message {
+    LogMessage {
+        date: DateTime<Local>,
+        level: Level,
+        message: String,
+    },
+    ChatMessage(ChatMessage),
+}
 
 pub enum CursorMovement {
     Left,
@@ -89,7 +106,7 @@ impl Drop for Renderer {
 
 pub struct UI {
     my_identity: PeerId,
-    messages: Vec<ChatMessage>,
+    messages: Vec<Message>,
     scroll_messages_view: usize,
     input: Vec<char>,
     input_cursor: usize,
@@ -321,40 +338,93 @@ impl UI {
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
-        self.messages.push(message);
+        self.messages.push(Message::ChatMessage(message));
+    }
+
+    pub fn print_error(&mut self, error: &str) {
+        self.messages.push(Message::LogMessage {
+            date: Local::now(),
+            level: Level::Error,
+            message: error.to_string(),
+        });
+    }
+
+    pub fn print_warning(&mut self, warning: &str) {
+        self.messages.push(Message::LogMessage {
+            date: Local::now(),
+            level: Level::Warning,
+            message: warning.to_string(),
+        });
     }
 
     pub fn draw(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         debug!("UI::draw called");
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(6)].as_ref())
+            .constraints(
+                [
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]
+                .as_ref(),
+            )
             .split(chunk);
 
-        let upper_chunk = chunks[0];
-        self.draw_messages_panel(frame, chunks[0]);
-        self.draw_input_panel(frame, chunks[1]);
+        self.draw_title_bar(frame, chunks[0]);
+        self.draw_messages_panel(frame, chunks[1]);
+        self.draw_status_bar(frame, chunks[2]);
+        self.draw_input_panel(frame, chunks[3]);
+    }
+
+    fn draw_title_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
+        let title_bar = Paragraph::new(format!("{} {}", crate_name!(), crate_version!()))
+            .block(Block::default().borders(Borders::NONE))
+            .style(Style::default().bg(Color::Blue))
+            .alignment(Alignment::Left);
+
+        frame.render_widget(title_bar, chunk);
     }
 
     fn draw_messages_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         let messages = self
             .messages
             .iter()
-            .map(|message| {
-                let color = match self.get_user_id(&message.user) {
-                    Some(id) => self.message_colors[id % self.message_colors.len()],
-                    None => self.my_user_color,
-                };
-                let date = message.date.format("%H:%M:%S ").to_string();
-                let long_username = message.user.to_base58();
-                let short_username = long_username[long_username.len() - 7..].to_string();
-                let mut ui_message = vec![
-                    Span::styled(date, Style::default().fg(self.date_color)),
-                    Span::styled(short_username, Style::default().fg(color)),
-                    Span::styled(": ", Style::default().fg(color)),
-                ];
-                ui_message.extend(Self::parse_content(&message.message));
-                Spans::from(ui_message)
+            .map(|message| match message {
+                Message::ChatMessage(message) => {
+                    let color = match self.get_user_id(&message.user) {
+                        Some(id) => self.message_colors[id % self.message_colors.len()],
+                        None => self.my_user_color,
+                    };
+                    let date = message.date.format("%H:%M:%S ").to_string();
+                    let long_username = message.user.to_base58();
+                    let short_username = long_username[long_username.len() - 7..].to_string();
+                    let mut ui_message = vec![
+                        Span::styled(date, Style::default().fg(self.date_color)),
+                        Span::styled(short_username, Style::default().fg(color)),
+                        Span::styled(": ", Style::default().fg(color)),
+                    ];
+                    ui_message.extend(Self::parse_content(&message.message));
+                    Spans::from(ui_message)
+                }
+                Message::LogMessage {
+                    date,
+                    level,
+                    message,
+                } => {
+                    let date = date.format("%H:%M:%S ").to_string();
+                    let color = match level {
+                        Level::Info => Color::Gray,
+                        Level::Warning => Color::Rgb(255, 127, 0),
+                        Level::Error => Color::Red,
+                    };
+                    let ui_message = vec![
+                        Span::styled(date, Style::default().fg(self.date_color)),
+                        Span::styled(message, Style::default().fg(color)),
+                    ];
+                    Spans::from(ui_message)
+                }
             })
             .collect::<Vec<_>>();
 
@@ -371,6 +441,15 @@ impl UI {
         frame.render_widget(messages_panel, chunk);
     }
 
+    fn draw_status_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
+        let status_bar = Paragraph::new("something")
+            .block(Block::default().borders(Borders::NONE))
+            .style(Style::default().bg(Color::Blue))
+            .alignment(Alignment::Left);
+
+        frame.render_widget(status_bar, chunk);
+    }
+
     fn parse_content(content: &str) -> Vec<Span> {
         vec![Span::raw(content)]
     }
@@ -385,16 +464,13 @@ impl UI {
             .collect::<Vec<_>>();
 
         let input_panel = Paragraph::new(input)
-            .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                "Your message",
-                Style::default().add_modifier(Modifier::BOLD),
-            )))
+            .block(Block::default().borders(Borders::NONE))
             .style(Style::default().fg(self.input_panel_color))
             .alignment(Alignment::Left);
 
         frame.render_widget(input_panel, chunk);
 
         let input_cursor = self.ui_input_cursor(inner_width);
-        frame.set_cursor(chunk.x + 1 + input_cursor.0, chunk.y + 1 + input_cursor.1)
+        frame.set_cursor(chunk.x + input_cursor.0, chunk.y + input_cursor.1)
     }
 }

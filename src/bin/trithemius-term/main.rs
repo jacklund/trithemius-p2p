@@ -114,6 +114,10 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
         })
     }
 
+    fn handle_error(&mut self, error_message: &str) {
+        self.ui.print_error(error_message);
+    }
+
     fn update(&mut self) -> Result<(), std::io::Error> {
         debug!("Called handler::update()");
         self.renderer.render(&self.ui)

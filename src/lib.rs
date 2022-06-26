@@ -90,6 +90,8 @@ pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
         event: EngineEvent,
     ) -> Result<Option<EngineEvent>, std::io::Error>;
 
+    fn handle_error(&mut self, error_message: &str);
+
     fn update(&mut self) -> Result<(), std::io::Error>;
 }
 
@@ -178,9 +180,12 @@ impl Engine {
                 line = input_stream.select_next_some() => {
                     match handler.handle_input(self, line)? {
                         Some(InputEvent::Message { topic, message }) => {
-                            debug!("Got message");
-                            let _message_id = self.publish(topic, message).unwrap();
-                            debug!("Published message");
+                            match self.publish(topic, message) {
+                                Ok(_message_id) => (),
+                                Err(error) => {
+                                    handler.handle_error(&format!("Error publishing message: {}", error));
+                                }
+                            }
                         },
                         Some(InputEvent::Shutdown) => {
                             debug!("Got shutdown");
