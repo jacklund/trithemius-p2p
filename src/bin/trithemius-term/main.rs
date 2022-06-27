@@ -110,12 +110,79 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                     .add_message(ChatMessage::new(source.unwrap(), message));
                 None
             }
+            EngineEvent::ConnectionEstablished {
+                peer_id,
+                endpoint,
+                num_established: _,
+                concurrent_dial_errors: _,
+            } => {
+                self.ui
+                    .log_info(&format!("Connected to {} at {:?}", peer_id, endpoint));
+                None
+            }
+            EngineEvent::ConnectionClosed {
+                peer_id,
+                endpoint,
+                num_established: _,
+                cause,
+            } => {
+                self.ui.log_info(&format!(
+                    "Connection closed to {} at {:?}: {:?}",
+                    peer_id, endpoint, cause
+                ));
+                None
+            }
+            EngineEvent::IncomingConnection {
+                local_addr,
+                send_back_addr,
+            } => {
+                self.ui.log_info(&format!(
+                    "Incoming connection to {} from {}",
+                    local_addr, send_back_addr,
+                ));
+                None
+            }
+            EngineEvent::NewListenAddr {
+                listener_id,
+                address,
+            } => {
+                self.ui.log_info(&format!(
+                    "Listener {:?} listening on {}",
+                    listener_id, address,
+                ));
+                None
+            }
+            EngineEvent::Dialing(peer_id) => {
+                self.ui.log_info(&format!("Dialing {}", peer_id,));
+                None
+            }
+            EngineEvent::Discovered(peers) => {
+                self.ui.log_info(&format!(
+                    "Discovered peers: {}",
+                    peers
+                        .iter()
+                        .map(|p| format!("{}@{}", p.peer_id, p.address))
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ));
+                None
+            }
+            EngineEvent::Subscribed { peer_id, topic } => {
+                self.ui
+                    .log_info(&format!("Peer {} subscribed to {}", peer_id, topic));
+                None
+            }
+            EngineEvent::Unsubscribed { peer_id, topic } => {
+                self.ui
+                    .log_info(&format!("Peer {} unsubscribed to {}", peer_id, topic));
+                None
+            }
             _ => None,
         })
     }
 
     fn handle_error(&mut self, error_message: &str) {
-        self.ui.print_error(error_message);
+        self.ui.log_error(error_message);
     }
 
     fn update(&mut self) -> Result<(), std::io::Error> {
@@ -128,7 +195,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     // env_logger::init();
-    simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
+    // simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
 
     // Create a random PeerId
     let id_keys = identity::Keypair::generate_ed25519();
@@ -148,7 +215,10 @@ async fn main() -> Result<(), std::io::Error> {
     }
 
     let topic = IdentTopic::new("chat");
-    let handler = MyHandler::new(peer_id, topic.clone());
+    let mut handler = MyHandler::new(peer_id, topic.clone());
+    handler
+        .ui
+        .log_info(&format!("Local peer id: {:?}", peer_id));
 
     // Listen on all interfaces and whatever port the OS assigns
     engine

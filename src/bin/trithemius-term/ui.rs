@@ -341,20 +341,24 @@ impl UI {
         self.messages.push(Message::ChatMessage(message));
     }
 
-    pub fn print_error(&mut self, error: &str) {
+    fn log_message(&mut self, level: Level, message: &str) {
         self.messages.push(Message::LogMessage {
             date: Local::now(),
-            level: Level::Error,
-            message: error.to_string(),
+            level,
+            message: message.to_string(),
         });
     }
 
-    pub fn print_warning(&mut self, warning: &str) {
-        self.messages.push(Message::LogMessage {
-            date: Local::now(),
-            level: Level::Warning,
-            message: warning.to_string(),
-        });
+    pub fn log_error(&mut self, message: &str) {
+        self.log_message(Level::Error, message);
+    }
+
+    pub fn log_warning(&mut self, message: &str) {
+        self.log_message(Level::Warning, message);
+    }
+
+    pub fn log_info(&mut self, message: &str) {
+        self.log_message(Level::Info, message);
     }
 
     pub fn draw(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
