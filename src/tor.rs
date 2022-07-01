@@ -89,6 +89,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + std::marker::Send> TorControlConnection
     async fn read_line(&mut self) -> Result<String, TorError> {
         let mut buf = String::new();
         self.stream.read_line(&mut buf).await?;
+        buf = buf
+            .strip_suffix("\r\n")
+            .or(buf.strip_suffix("\n"))
+            .unwrap_or(&buf)
+            .to_string();
         Ok(buf)
     }
 
@@ -117,10 +122,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + std::marker::Send> TorControlConnection
     async fn parse_control_response(&mut self) -> Result<(u16, Vec<String>), TorError> {
         lazy_static! {
             static ref RE: Regex =
-                Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\n?$").unwrap();
+                Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
         }
 
-        let line = self.read_line().await?;
+        let mut line = self.read_line().await?;
         match RE.captures(&line) {
             Some(captures) => {
                 let code = captures["code"].parse::<u16>().unwrap();
@@ -237,8 +242,8 @@ mod tests {
 
         // Multiline response
         let mock = Builder::new()
-            .read(b"250-ServiceID=647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\n")
-            .read(b"250-PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==\n")
+            .read(b"250-ServiceID=647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\r\n")
+            .read(b"250-PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==\r\n")
             .read(b"250 OK")
             .build();
         let mut tor = TorControlConnectionBuilder::default().mock(mock);
@@ -256,8 +261,8 @@ mod tests {
         // Data response
         let mock = Builder::new()
             .read(b"250+onions/current=\n")
-            .read(b"647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\n")
-            .read(b"yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid\n")
+            .read(b"647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\r\n")
+            .read(b"yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid\r\n")
             .read(b".")
             .build();
         let mut tor = TorControlConnectionBuilder::default().mock(mock);
@@ -268,11 +273,11 @@ mod tests {
         assert_eq!(3, responses.len());
         assert_eq!("onions/current=", responses[0]);
         assert_eq!(
-            "647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\n",
+            "647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd",
             responses[1]
         );
         assert_eq!(
-            "yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid\n",
+            "yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid",
             responses[2]
         );
     }
