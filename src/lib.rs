@@ -1,4 +1,5 @@
 pub mod engine_event;
+pub mod tor;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
@@ -106,6 +107,8 @@ impl Engine {
         peer_id: PeerId,
     ) -> Result<Self, std::io::Error> {
         // To content-address message, we can take the hash of message and use it as an ID.
+        // TODO: This means we can't publish same message twice, probably not what we want, change
+        // this!!!
         let message_id_fn = |message: &GossipsubMessage| {
             let mut s = DefaultHasher::new();
             message.data.hash(&mut s);
@@ -153,6 +156,13 @@ impl Engine {
             .behaviour_mut()
             .pub_sub
             .subscribe(&IdentTopic::new(topic))
+    }
+
+    pub fn unsubscribe(&mut self, topic: &str) -> Result<bool, PublishError> {
+        self.swarm
+            .behaviour_mut()
+            .pub_sub
+            .unsubscribe(&IdentTopic::new(topic))
     }
 
     pub fn publish(&mut self, topic: IdentTopic, data: Vec<u8>) -> Result<MessageId, PublishError> {

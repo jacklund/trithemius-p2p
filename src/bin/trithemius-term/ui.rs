@@ -168,22 +168,61 @@ impl UI {
     }
 
     fn handle_command<'a, I: Iterator<Item = &'a str>>(
-        &self,
+        &mut self,
         engine: &mut Engine,
         mut command_args: I,
     ) -> Result<Option<InputEvent>, std::io::Error> {
-        match command_args.next() {
+        let command = command_args.next();
+        self.log_info(&format!("Got command '{:?}'", command));
+        match command {
             Some(command) => match command.to_ascii_lowercase().as_str() {
-                "subscribe" => {
-                    match command_args.next() {
-                        Some(topic_name) => {
-                            engine.subscribe(topic_name); // TODO: Handle error
-                            Ok(None)
-                        }
-                        None => Ok(None), // TODO: Error
+                "subscribe" => match command_args.next() {
+                    Some(topic_name) => {
+                        match engine.subscribe(topic_name) {
+                            Ok(true) => {
+                                self.log_info(&format!("Subscribed to topic '{}'", topic_name))
+                            }
+                            Ok(false) => self
+                                .log_info(&format!("Already subscribed to topic '{}'", topic_name)),
+                            Err(error) => self.log_error(&format!(
+                                "Error subscribing to topic {}: {}",
+                                topic_name, error
+                            )),
+                        };
+                        Ok(None)
                     }
+                    None => {
+                        self.log_error("'subscribe' command requires topic name to subscribe to");
+                        Ok(None)
+                    }
+                },
+                "unsubscribe" => match command_args.next() {
+                    Some(topic_name) => {
+                        match engine.unsubscribe(topic_name) {
+                            Ok(true) => {
+                                self.log_info(&format!("Unsubscribed to topic '{}'", topic_name))
+                            }
+                            Ok(false) => self
+                                .log_info(&format!("Never subscribed to topic '{}'", topic_name)),
+                            Err(error) => self.log_error(&format!(
+                                "Error unsubscribing to topic {}: {}",
+                                topic_name, error
+                            )),
+                        };
+                        Ok(None)
+                    }
+                    None => {
+                        self.log_error(
+                            "'unsubscribe' command requires topic name to unsubscribe from",
+                        );
+                        Ok(None)
+                    }
+                },
+                "quit" => Ok(Some(InputEvent::Shutdown)),
+                _ => {
+                    self.log_error(&format!("Unknown command '{}'", command));
+                    Ok(None)
                 }
-                _ => Ok(None),
             },
             None => Ok(None),
         }
@@ -203,6 +242,9 @@ impl UI {
                 KeyCode::Char(character) => {
                     if character == 'c' && modifiers.contains(KeyModifiers::CONTROL) {
                         Ok(Some(InputEvent::Shutdown))
+                    } else if character == 'u' && modifiers.contains(KeyModifiers::CONTROL) {
+                        self.clear_input_to_cursor();
+                        Ok(None)
                     } else {
                         self.input_write(character);
                         Ok(None)
@@ -326,6 +368,13 @@ impl UI {
             ScrollMovement::Start => {
                 self.scroll_messages_view += 0;
             }
+        }
+    }
+
+    pub fn clear_input_to_cursor(&mut self) {
+        if !self.input.is_empty() {
+            self.input.drain(..self.input_cursor);
+            self.input_cursor = 0;
         }
     }
 
