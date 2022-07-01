@@ -281,4 +281,13 @@ mod tests {
             responses[2]
         );
     }
+
+    #[tokio::test]
+    async fn authenticate() {
+        let mock = Builder::new().read(b"250 OK").build();
+        let mut tor = TorControlConnectionBuilder::default().mock(mock);
+        let result = tor.authenticate().await;
+        assert!(result.is_ok());
+        assert_eq!(true, result.unwrap());
+    }
 }
