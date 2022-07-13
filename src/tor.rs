@@ -163,7 +163,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + std::marker::Send> TorControlConnection
         }
     }
 
-    // TODO: Refactor!!!
     async fn create_transient_onion_service(
         &mut self,
         virt_port: u16,
@@ -179,31 +178,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + std::marker::Send> TorControlConnection
         .await?;
         let (code, response) = self.parse_control_response().await?;
         match code {
-            250 => {
-                let service_id: String;
-                match code {
-                    250 => match RE.captures(&response[0]) {
-                        Some(captures) => {
-                            service_id = captures["value"].into();
-                            Ok(OnionService {
-                                virt_port,
-                                target_port,
-                                service_id,
-                            })
-                        }
-                        None => Err(TorError::ProtocolError(format!(
-                            "Unexpected response: {} {}",
-                            code,
-                            response.join(" "),
-                        ))),
-                    },
-                    _ => Err(TorError::ProtocolError(format!(
-                        "Unexpected response: {} {}",
-                        code,
-                        response.join(" "),
-                    ))),
-                }
-            }
+            250 => match RE.captures(&response[0]) {
+                Some(captures) => Ok(OnionService {
+                    virt_port,
+                    target_port,
+                    service_id: captures["value"].into(),
+                }),
+                None => Err(TorError::ProtocolError(format!(
+                    "Unexpected response: {} {}",
+                    code,
+                    response.join(" "),
+                ))),
+            },
             _ => Err(TorError::ProtocolError(format!(
                 "Unexpected response: {} {}",
                 code,
