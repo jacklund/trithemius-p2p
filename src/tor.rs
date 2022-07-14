@@ -12,16 +12,16 @@ pub struct OnionService {
     service_id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum TorError {
     AuthenticationError(String),
     ProtocolError(String),
-    IOError(std::io::Error),
+    IOError(String),
 }
 
 impl From<std::io::Error> for TorError {
     fn from(error: std::io::Error) -> TorError {
-        TorError::IOError(error)
+        TorError::IOError(error.to_string())
     }
 }
 
@@ -97,14 +97,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + std::marker::Send> TorControlConnection
         Ok(buf)
     }
 
-    async fn authenticate(&mut self) -> Result<bool, TorError> {
+    // TODO: Don't return bool, return either () or error, and grab error string on error
+    async fn authenticate(&mut self) -> Result<(), TorError> {
         match self.authentication {
             TorControlAuthentication::None => {
                 self.write("AUTHENTICATE").await?;
                 let (code, response) = self.parse_control_response().await?;
                 match code {
-                    250 => Ok(true),
-                    515 => Err(TorError::AuthenticationError(response.join(" "))),
+                    250 => Ok(()),
+                    551 => Err(TorError::AuthenticationError(response.join(" "))),
                     _ => Err(TorError::AuthenticationError(format!(
                         "Unexpected response: {} {}",
                         code,
@@ -274,6 +275,14 @@ mod tests {
         let mut tor = TorControlConnectionBuilder::default().mock(mock);
         let result = tor.authenticate().await;
         assert!(result.is_ok());
-        assert_eq!(true, result.unwrap());
+
+        let mock = Builder::new().read(b"551 Oops").build();
+        let mut tor = TorControlConnectionBuilder::default().mock(mock);
+        let result = tor.authenticate().await;
+        assert!(result.is_err());
+        assert_eq!(
+            TorError::AuthenticationError("Oops".into()),
+            result.unwrap_err()
+        );
     }
 }
