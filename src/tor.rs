@@ -59,9 +59,11 @@ impl TorAuthentication {
                 connection.write("AUTHENTICATE").await?;
                 let mut reader = connection.reader.take().unwrap();
                 match read_control_response(&mut reader).await {
-                    Ok((code, response)) => match code {
+                    Ok(control_response) => match control_response.code {
                         250 => Ok(()),
-                        _ => Err(TorError::AuthenticationError(response.join(" "))),
+                        _ => Err(TorError::AuthenticationError(
+                            control_response.response.join(" "),
+                        )),
                     },
                     Err(error) => {
                         connection.reader = Some(reader);
@@ -106,7 +108,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
         let mut reader = self.reader.take().unwrap();
         tokio::spawn(async move {
             loop {
-                let (code, response_lines) = read_control_response(&mut reader).await.unwrap();
+                let control_response = read_control_response(&mut reader).await.unwrap();
             }
         });
     }
@@ -124,9 +126,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
     //         virt_port, target_port
     //     ))
     //     .await?;
-    //     let (code, response) = read_control_response(&mut self.reader.unwrap()).await?;
-    //     match code {
-    //         250 => match RE.captures(&response[0]) {
+    //     let control_response = read_control_response(&mut self.reader.unwrap()).await?;
+    //     match control_response.code {
+    //         250 => match RE.captures(&control_response.response[0]) {
     //             Some(captures) => Ok(OnionService {
     //                 virt_port,
     //                 target_port,
@@ -134,14 +136,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
     //             }),
     //             None => Err(TorError::ProtocolError(format!(
     //                 "Unexpected response: {} {}",
-    //                 code,
-    //                 response.join(" "),
+    //                 control_response.code,
+    //                 control_response.response.join(" "),
     //             ))),
     //         },
     //         _ => Err(TorError::ProtocolError(format!(
     //             "Unexpected response: {} {}",
-    //             code,
-    //             response.join(" "),
+    //             control_response.code,
+    //             control_response.response.join(" "),
     //         ))),
     //     }
     // }
@@ -157,24 +159,53 @@ async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>
     }
 }
 
+enum ControlResponseType {
+    SyncResponse,
+    AsyncResponse(String),
+}
+
+struct ControlResponse {
+    code: u16,
+    indicator: char,
+    response_type: ControlResponseType,
+    response: Vec<String>,
+}
+
+impl<'a> From<regex::Captures<'a>> for ControlResponse {
+    fn from(captures: regex::Captures) -> Self {
+        let code = captures["code"].parse::<u16>().unwrap();
+        let indicator = captures["type"].chars().last().unwrap();
+        let response_type = if code >= 600 {
+            ControlResponseType::AsyncResponse(captures["keyword"].to_string())
+        } else {
+            ControlResponseType::SyncResponse
+        };
+        let response = vec![captures["response"].to_string()];
+
+        Self {
+            code,
+            indicator,
+            response_type,
+            response,
+        }
+    }
+}
+
 async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
     reader: &mut S,
-) -> Result<(u16, char, String), TorError> {
+) -> Result<ControlResponse, TorError> {
     lazy_static! {
-        static ref RE: Regex =
+        static ref AsyncRegex: Regex = Regex::new(
+            r"^(?P<code>6\d{2})(?P<type>[\- +])(?P<keyword>[^ ]*) (?P<response>.*)\r?\n?$"
+        )
+        .unwrap();
+        static ref SyncRegex: Regex =
             Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
     }
 
     let line = read_line(reader).await?;
-    match RE.captures(&line) {
-        Some(captures) => {
-            let code = captures["code"].parse::<u16>().unwrap();
-            Ok((
-                code,
-                captures["type"].chars().last().unwrap(),
-                captures["response"].to_string(),
-            ))
-        }
+    match SyncRegex.captures(&line) {
+        Some(captures) => Ok(captures.into()),
         None => Err(TorError::ProtocolError(format!(
             "Unknown response: {}",
             line
@@ -184,32 +215,33 @@ async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecErr
 
 async fn read_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
     reader: &mut S,
-) -> Result<(u16, Vec<String>), TorError> {
-    let (code, response_type, response) = parse_control_response(reader).await?;
-    match response_type {
-        ' ' => Ok((code, vec![response.into()])),
+) -> Result<ControlResponse, TorError> {
+    let mut control_response = parse_control_response(reader).await?;
+    match control_response.indicator {
+        ' ' => Ok(control_response),
         '-' => {
-            let mut aggregated_response = vec![response.into()];
+            let mut aggregated_response = vec![control_response.response[0].clone()];
             loop {
-                let (code, response_type, response) = parse_control_response(reader).await?;
-                match response_type {
-                    ' ' => match code {
+                let control_response = parse_control_response(reader).await?;
+                match control_response.indicator {
+                    ' ' => match control_response.code {
                         250 => break,
                         _ => Err(TorError::ProtocolError(format!(
                             "Unexpected code {} during mid response",
-                            code,
+                            control_response.code,
                         )))?,
                     },
-                    '-' => aggregated_response.push(response),
+                    '-' => aggregated_response.extend(control_response.response),
                     _ => Err(TorError::protocol_error(
                         "Unexpected response type during mid response",
                     ))?,
                 }
             }
-            Ok((code, aggregated_response))
+            control_response.response = aggregated_response;
+            Ok(control_response)
         }
         '+' => {
-            let mut response = vec![response.into()];
+            let mut response = vec![control_response.response[0].clone()];
             loop {
                 let line = read_line(reader).await?;
                 if line == "." {
@@ -217,11 +249,15 @@ async fn read_control_response<S: StreamExt<Item = Result<String, LinesCodecErro
                 }
                 response.push(line);
             }
-            Ok((code, response))
+            control_response.response = response;
+            Ok(control_response)
         }
         _ => Err(TorError::ProtocolError(format!(
             "Unexpected response type '{}': {}{}{}",
-            response_type, code, response_type, response,
+            control_response.indicator,
+            control_response.code,
+            control_response.indicator,
+            control_response.response.join(" "),
         ))),
     }
 }
@@ -261,10 +297,10 @@ mod tests {
         server.send("250 OK").await?;
         let result = read_control_response(&mut client).await;
         assert!(result.is_ok());
-        let (code, responses) = result.unwrap();
-        assert_eq!(250, code);
-        assert_eq!(1, responses.len());
-        assert_eq!("OK", responses[0]);
+        let control_response = result.unwrap();
+        assert_eq!(250, control_response.code);
+        assert_eq!(1, control_response.response.len());
+        assert_eq!("OK", control_response.response[0]);
 
         Ok(())
     }
@@ -290,14 +326,14 @@ mod tests {
         server.send("250 OK").await?;
         let result = read_control_response(&mut client).await;
         assert!(result.is_ok());
-        let (code, responses) = result.unwrap();
-        assert_eq!(250, code);
-        assert_eq!(2, responses.len());
+        let control_response = result.unwrap();
+        assert_eq!(250, control_response.code);
+        assert_eq!(2, control_response.response.len());
         assert_eq!(
             "ServiceID=647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd",
-            responses[0]
+            control_response.response[0]
         );
-        assert_eq!("PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==", responses[1]);
+        assert_eq!("PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==", control_response.response[1]);
 
         Ok(())
     }
@@ -316,17 +352,17 @@ mod tests {
         server.send(".").await?;
         let result = read_control_response(&mut client).await;
         assert!(result.is_ok());
-        let (code, responses) = result.unwrap();
-        assert_eq!(250, code);
-        assert_eq!(3, responses.len());
-        assert_eq!("onions/current=", responses[0]);
+        let control_response = result.unwrap();
+        assert_eq!(250, control_response.code);
+        assert_eq!(3, control_response.response.len());
+        assert_eq!("onions/current=", control_response.response[0]);
         assert_eq!(
             "647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd",
-            responses[1]
+            control_response.response[1]
         );
         assert_eq!(
             "yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid",
-            responses[2]
+            control_response.response[2]
         );
 
         Ok(())
