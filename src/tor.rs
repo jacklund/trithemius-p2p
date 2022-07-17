@@ -1,10 +1,9 @@
-use async_recursion::async_recursion;
+use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::net::SocketAddr;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio_test::io::Mock;
+use std::marker::Send;
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
 pub struct OnionService {
     virt_port: u16,
@@ -19,208 +18,263 @@ enum TorError {
     IOError(String),
 }
 
+impl TorError {
+    fn authentication_error(msg: &str) -> TorError {
+        TorError::AuthenticationError(msg.to_string())
+    }
+
+    fn protocol_error(msg: &str) -> TorError {
+        TorError::ProtocolError(msg.to_string())
+    }
+}
+
 impl From<std::io::Error> for TorError {
     fn from(error: std::io::Error) -> TorError {
         TorError::IOError(error.to_string())
     }
 }
 
-pub enum TorControlAuthentication {
-    None,
+impl From<LinesCodecError> for TorError {
+    fn from(error: LinesCodecError) -> TorError {
+        match error {
+            LinesCodecError::MaxLineLengthExceeded => TorError::ProtocolError(error.to_string()),
+            LinesCodecError::Io(error) => error.into(),
+        }
+    }
+}
+
+pub enum TorAuthentication {
+    Null,
     SafeCookie(String),     // Cookie String
     HashedPassword(String), // Password
 }
 
-pub struct TorControlConnectionBuilder {
-    authentication: TorControlAuthentication,
-    address: SocketAddr,
+impl TorAuthentication {
+    async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static>(
+        &self,
+        connection: &mut TorControlConnection<S>,
+    ) -> Result<(), TorError> {
+        match self {
+            TorAuthentication::Null => {
+                connection.write("AUTHENTICATE").await?;
+                let mut reader = connection.reader.take().unwrap();
+                match read_control_response(&mut reader).await {
+                    Ok((code, response)) => match code {
+                        250 => Ok(()),
+                        _ => Err(TorError::AuthenticationError(response.join(" "))),
+                    },
+                    Err(error) => {
+                        connection.reader = Some(reader);
+                        Err(error)
+                    }
+                }
+            }
+            _ => Err(TorError::authentication_error(
+                "Haven't implemented that authentication method yet",
+            )),
+        }
+    }
 }
 
-impl Default for TorControlConnectionBuilder {
-    fn default() -> Self {
+pub struct TorControlConnection<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static,
+{
+    reader: Option<FramedRead<ReadHalf<S>, LinesCodec>>,
+    writer: FramedWrite<WriteHalf<S>, LinesCodec>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnection<S> {
+    fn connect(stream: S) -> Self {
+        let (reader, writer) = tokio::io::split(stream);
         Self {
-            authentication: TorControlAuthentication::None,
-            address: "127.0.0.1:9501".parse().unwrap(),
+            reader: Some(FramedRead::new(reader, LinesCodec::new())),
+            writer: FramedWrite::new(writer, LinesCodec::new()),
         }
     }
-}
 
-impl TorControlConnectionBuilder {
-    fn with_authentication(mut self, auth: TorControlAuthentication) -> Self {
-        self.authentication = auth;
-        self
-    }
-
-    fn address<A>(mut self, addr: A) -> Self
-    where
-        SocketAddr: From<A>,
-    {
-        self.address = addr.into();
-        self
-    }
-
-    async fn connect(self) -> Result<TorControlConnection<TcpStream>, TorError> {
-        let connection = TcpStream::connect(self.address).await?;
-        Ok(TorControlConnection {
-            authentication: self.authentication,
-            stream: tokio::io::BufStream::new(connection),
-        })
-    }
-
-    fn mock(self, mock: Mock) -> TorControlConnection<Mock> {
-        TorControlConnection {
-            authentication: self.authentication,
-            stream: tokio::io::BufStream::new(mock),
-        }
-    }
-}
-
-pub struct TorControlConnection<S: AsyncRead + AsyncWrite + Unpin> {
-    authentication: TorControlAuthentication,
-    stream: tokio::io::BufStream<S>,
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin + std::marker::Send> TorControlConnection<S> {
     async fn write(&mut self, data: &str) -> Result<(), TorError> {
-        self.stream.write_all(data.as_bytes()).await?;
+        self.writer.send(data).await?;
         Ok(())
     }
 
-    async fn read_line(&mut self) -> Result<String, TorError> {
-        let mut buf = String::new();
-        self.stream.read_line(&mut buf).await?;
-        buf = buf
-            .strip_suffix("\r\n")
-            .or(buf.strip_suffix("\n"))
-            .unwrap_or(&buf)
-            .to_string();
-        Ok(buf)
+    async fn authenticate(&mut self, method: TorAuthentication) -> Result<(), TorError> {
+        method.authenticate(self).await
     }
 
-    // TODO: Don't return bool, return either () or error, and grab error string on error
-    async fn authenticate(&mut self) -> Result<(), TorError> {
-        match self.authentication {
-            TorControlAuthentication::None => {
-                self.write("AUTHENTICATE").await?;
-                let (code, response) = self.parse_control_response().await?;
-                match code {
-                    250 => Ok(()),
-                    551 => Err(TorError::AuthenticationError(response.join(" "))),
-                    _ => Err(TorError::AuthenticationError(format!(
-                        "Unexpected response: {} {}",
-                        code,
-                        response.join(" ")
-                    ))),
-                }
+    async fn start_read_loop(&mut self) {
+        let mut reader = self.reader.take().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (code, response_lines) = read_control_response(&mut reader).await.unwrap();
             }
-            _ => Err(TorError::AuthenticationError(
-                "We only currently support TorControlAuthentication::None".into(),
-            )), // TODO: Implement other auth methods
-        }
+        });
     }
 
-    #[async_recursion]
-    async fn parse_control_response(&mut self) -> Result<(u16, Vec<String>), TorError> {
-        lazy_static! {
-            static ref RE: Regex =
-                Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
-        }
+    // async fn create_transient_onion_service(
+    //     &mut self,
+    //     virt_port: u16,
+    //     target_port: u16,
+    // ) -> Result<OnionService, TorError> {
+    //     lazy_static! {
+    //         static ref RE: Regex = Regex::new(r"^[^=]*=(?P<value>.*)$").unwrap();
+    //     }
+    //     self.write(&format!(
+    //         "ADD_ONION NEW:BEST Flags=DiscardPK Port={},{}",
+    //         virt_port, target_port
+    //     ))
+    //     .await?;
+    //     let (code, response) = read_control_response(&mut self.reader.unwrap()).await?;
+    //     match code {
+    //         250 => match RE.captures(&response[0]) {
+    //             Some(captures) => Ok(OnionService {
+    //                 virt_port,
+    //                 target_port,
+    //                 service_id: captures["value"].into(),
+    //             }),
+    //             None => Err(TorError::ProtocolError(format!(
+    //                 "Unexpected response: {} {}",
+    //                 code,
+    //                 response.join(" "),
+    //             ))),
+    //         },
+    //         _ => Err(TorError::ProtocolError(format!(
+    //             "Unexpected response: {} {}",
+    //             code,
+    //             response.join(" "),
+    //         ))),
+    //     }
+    // }
+}
 
-        let mut line = self.read_line().await?;
-        match RE.captures(&line) {
-            Some(captures) => {
-                let code = captures["code"].parse::<u16>().unwrap();
-                match &captures["type"] {
-                    " " => Ok((code, vec![captures["response"].into()])),
-                    "-" => {
-                        let mut response = vec![captures["response"].into()];
-                        let (_, new_response) = self.parse_control_response().await?;
-                        if new_response.len() != 1 || new_response[0] != "OK" {
-                            response.extend(new_response.clone());
-                        }
-                        Ok((code, response))
-                    }
-                    "+" => {
-                        let mut response = vec![captures["response"].into()];
-                        loop {
-                            let line = self.read_line().await?;
-                            if line == "." {
-                                break;
-                            }
-                            response.push(line);
-                        }
-                        Ok((code, response))
-                    }
-                    _ => Err(TorError::ProtocolError(format!(
-                        "Unexpected response type '{}': {}",
-                        &captures["type"], line,
-                    ))),
-                }
-            }
-            None => Err(TorError::ProtocolError(format!(
-                "Unknown response: {}",
-                line
-            ))),
-        }
+async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+    reader: &mut S,
+) -> Result<String, TorError> {
+    match reader.next().await {
+        Some(Ok(line)) => Ok(line),
+        Some(Err(error)) => Err(error.into()),
+        None => Err(TorError::protocol_error("Unexpected EOF on stream")),
+    }
+}
+
+async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+    reader: &mut S,
+) -> Result<(u16, char, String), TorError> {
+    lazy_static! {
+        static ref RE: Regex =
+            Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
     }
 
-    async fn create_transient_onion_service(
-        &mut self,
-        virt_port: u16,
-        target_port: u16,
-    ) -> Result<OnionService, TorError> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r"^[^=]*=(?P<value>.*)$").unwrap();
-        }
-        self.write(&format!(
-            "ADD_ONION NEW:BEST Flags=DiscardPK Port={},{}",
-            virt_port, target_port
-        ))
-        .await?;
-        let (code, response) = self.parse_control_response().await?;
-        match code {
-            250 => match RE.captures(&response[0]) {
-                Some(captures) => Ok(OnionService {
-                    virt_port,
-                    target_port,
-                    service_id: captures["value"].into(),
-                }),
-                None => Err(TorError::ProtocolError(format!(
-                    "Unexpected response: {} {}",
-                    code,
-                    response.join(" "),
-                ))),
-            },
-            _ => Err(TorError::ProtocolError(format!(
-                "Unexpected response: {} {}",
+    let line = read_line(reader).await?;
+    match RE.captures(&line) {
+        Some(captures) => {
+            let code = captures["code"].parse::<u16>().unwrap();
+            Ok((
                 code,
-                response.join(" "),
-            ))),
+                captures["type"].chars().last().unwrap(),
+                captures["response"].to_string(),
+            ))
         }
+        None => Err(TorError::ProtocolError(format!(
+            "Unknown response: {}",
+            line
+        ))),
+    }
+}
+
+async fn read_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+    reader: &mut S,
+) -> Result<(u16, Vec<String>), TorError> {
+    let (code, response_type, response) = parse_control_response(reader).await?;
+    match response_type {
+        ' ' => Ok((code, vec![response.into()])),
+        '-' => {
+            let mut aggregated_response = vec![response.into()];
+            loop {
+                let (code, response_type, response) = parse_control_response(reader).await?;
+                match response_type {
+                    ' ' => match code {
+                        250 => break,
+                        _ => Err(TorError::ProtocolError(format!(
+                            "Unexpected code {} during mid response",
+                            code,
+                        )))?,
+                    },
+                    '-' => aggregated_response.push(response),
+                    _ => Err(TorError::protocol_error(
+                        "Unexpected response type during mid response",
+                    ))?,
+                }
+            }
+            Ok((code, aggregated_response))
+        }
+        '+' => {
+            let mut response = vec![response.into()];
+            loop {
+                let line = read_line(reader).await?;
+                if line == "." {
+                    break;
+                }
+                response.push(line);
+            }
+            Ok((code, response))
+        }
+        _ => Err(TorError::ProtocolError(format!(
+            "Unexpected response type '{}': {}{}{}",
+            response_type, code, response_type, response,
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test::io::Builder;
+    use futures::SinkExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_util::codec::{Framed, LinesCodec};
+
+    async fn create_mock() -> Result<(TcpStream, TcpStream), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let join_handle = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let client = TcpStream::connect(addr).await?;
+        let (server_stream, _) = join_handle.await?;
+
+        Ok((client, server_stream))
+    }
+
+    async fn create_framed_mock() -> Result<
+        (Framed<TcpStream, LinesCodec>, Framed<TcpStream, LinesCodec>),
+        Box<dyn std::error::Error>,
+    > {
+        let (client, server) = create_mock().await?;
+        let reader = Framed::new(client, LinesCodec::new());
+        let server = Framed::new(server, LinesCodec::new());
+
+        Ok((reader, server))
+    }
 
     #[tokio::test]
-    async fn parse_control_response() {
+    async fn test_read_good_control_response() -> Result<(), Box<dyn std::error::Error>> {
         // 250 OK response
-        let mock = Builder::new().read(b"250 OK").build();
-        let mut tor = TorControlConnectionBuilder::default().mock(mock);
-        let result = tor.parse_control_response().await;
+        let (mut client, mut server) = create_framed_mock().await?;
+        server.send("250 OK").await?;
+        let result = read_control_response(&mut client).await;
         assert!(result.is_ok());
         let (code, responses) = result.unwrap();
         assert_eq!(250, code);
         assert_eq!(1, responses.len());
         assert_eq!("OK", responses[0]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_garbled_control_response() -> Result<(), Box<dyn std::error::Error>> {
         // garbled response
-        let mock = Builder::new().read(b"idon'tknowwhatthisis").build();
-        let mut tor = TorControlConnectionBuilder::default().mock(mock);
-        let result = tor.parse_control_response().await;
+        let (mut client, mut server) = create_framed_mock().await?;
+        server.send("idon'tknowwhatthisis").await?;
+        let result = read_control_response(&mut client).await;
         assert!(result.is_err());
         match result.err() {
             Some(TorError::ProtocolError(_)) => assert!(true),
@@ -228,13 +282,13 @@ mod tests {
         }
 
         // Multiline response
-        let mock = Builder::new()
-            .read(b"250-ServiceID=647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\r\n")
-            .read(b"250-PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==\r\n")
-            .read(b"250 OK")
-            .build();
-        let mut tor = TorControlConnectionBuilder::default().mock(mock);
-        let result = tor.parse_control_response().await;
+        let (mut client, mut server) = create_framed_mock().await?;
+        server
+            .send("250-ServiceID=647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd")
+            .await?;
+        server.send("250-PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==").await?;
+        server.send("250 OK").await?;
+        let result = read_control_response(&mut client).await;
         assert!(result.is_ok());
         let (code, responses) = result.unwrap();
         assert_eq!(250, code);
@@ -245,15 +299,22 @@ mod tests {
         );
         assert_eq!("PrivateKey=ED25519-V3:yLSDc8b11PaIHTtNtvi9lNW99IME2mdrO4k381zDkHv//WRUGrkBALBQ9MbHy2SLA/NmfS7YxmcR/FY8ppRfIA==", responses[1]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_data_control_response() -> Result<(), Box<dyn std::error::Error>> {
         // Data response
-        let mock = Builder::new()
-            .read(b"250+onions/current=\n")
-            .read(b"647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd\r\n")
-            .read(b"yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid\r\n")
-            .read(b".")
-            .build();
-        let mut tor = TorControlConnectionBuilder::default().mock(mock);
-        let result = tor.parse_control_response().await;
+        let (mut client, mut server) = create_framed_mock().await?;
+        server.send("250+onions/current=").await?;
+        server
+            .send("647qjf6w3evdbdpy7oidf5vda6rsjzsl5a6ofsaou2v77hj7dmn2spqd")
+            .await?;
+        server
+            .send("yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid")
+            .await?;
+        server.send(".").await?;
+        let result = read_control_response(&mut client).await;
         assert!(result.is_ok());
         let (code, responses) = result.unwrap();
         assert_eq!(250, code);
@@ -267,22 +328,30 @@ mod tests {
             "yxq7fa63tthq3nd2ul52jjcdpblyai6k3cfmdkyw23ljsoob66z3ywid",
             responses[2]
         );
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn authenticate() {
-        let mock = Builder::new().read(b"250 OK").build();
-        let mut tor = TorControlConnectionBuilder::default().mock(mock);
-        let result = tor.authenticate().await;
+    async fn authenticate() -> Result<(), Box<dyn std::error::Error>> {
+        let (client, server) = create_mock().await?;
+        let mut server = Framed::new(server, LinesCodec::new());
+        server.send("250 OK").await?;
+        let mut tor = TorControlConnection::connect(client);
+        let result = tor.authenticate(TorAuthentication::Null).await;
         assert!(result.is_ok());
 
-        let mock = Builder::new().read(b"551 Oops").build();
-        let mut tor = TorControlConnectionBuilder::default().mock(mock);
-        let result = tor.authenticate().await;
+        let (client, server) = create_mock().await?;
+        let mut server = Framed::new(server, LinesCodec::new());
+        server.send("551 Oops").await?;
+        let mut tor = TorControlConnection::connect(client);
+        let result = tor.authenticate(TorAuthentication::Null).await;
         assert!(result.is_err());
         assert_eq!(
             TorError::AuthenticationError("Oops".into()),
             result.unwrap_err()
         );
+
+        Ok(())
     }
 }
