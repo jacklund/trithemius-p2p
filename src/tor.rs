@@ -3,7 +3,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::marker::Send;
-use tokio::io::{AsyncRead, AsyncWrite, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
@@ -19,6 +19,18 @@ enum TorError {
     ProtocolError(String),
     IOError(String),
 }
+
+impl std::fmt::Display for TorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::AuthenticationError(error) => write!(f, "Authentication Error: {}", error),
+            Self::ProtocolError(error) => write!(f, "Protocol Error: {}", error),
+            Self::IOError(error) => write!(f, "IO Error: {}", error),
+        }
+    }
+}
+
+impl std::error::Error for TorError {}
 
 impl TorError {
     fn authentication_error(msg: &str) -> TorError {
@@ -89,8 +101,24 @@ where
 impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnection<S> {
     fn connect(stream: S) -> Self {
         let (reader, writer) = tokio::io::split(stream);
-        let (registration_sender, mut registration_receiver) = mpsc::unbounded_channel();
-        let (sync_sender, mut sync_receiver) = mpsc::unbounded_channel();
+        let (registration_sender, registration_receiver) = mpsc::unbounded_channel();
+        let (sync_sender, sync_receiver) = mpsc::unbounded_channel();
+        Self::start_read_loop(reader, registration_receiver, sync_sender);
+        Self {
+            writer: FramedWrite::new(writer, LinesCodec::new()),
+            registration_sender,
+            sync_receiver,
+        }
+    }
+
+    fn start_read_loop(
+        reader: ReadHalf<S>,
+        mut registration_receiver: mpsc::UnboundedReceiver<(
+            String,
+            oneshot::Sender<ControlResponse>,
+        )>,
+        sync_sender: mpsc::UnboundedSender<ControlResponse>,
+    ) {
         tokio::spawn(async move {
             let mut async_map = HashMap::<String, oneshot::Sender<ControlResponse>>::new();
             let mut reader = FramedRead::new(reader, LinesCodec::new());
@@ -102,7 +130,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
                             ControlResponseType::AsyncResponse(ref keyword) => {
                                 match async_map.remove(keyword) {
                                     Some(sender) => {
-                                        sender.send(control_response);
+                                        sender.send(control_response).unwrap();
                                     }
                                     None => {
                                         panic!("Got response without a registered callback!");
@@ -110,7 +138,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
                                 }
                             },
                             ControlResponseType::SyncResponse => {
-                                sync_sender.send(control_response);
+                                sync_sender.send(control_response).unwrap();
                             },
                         }
                     },
@@ -120,11 +148,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
                 };
             }
         });
-        Self {
-            writer: FramedWrite::new(writer, LinesCodec::new()),
-            registration_sender,
-            sync_receiver,
-        }
     }
 
     async fn write(&mut self, data: &str) -> Result<(), TorError> {
@@ -146,7 +169,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
         }
     }
 
-    async fn register_for_async_response(
+    fn register_for_async_response(
         &mut self,
         keyword: &str,
     ) -> Result<oneshot::Receiver<ControlResponse>, TorError> {
@@ -203,7 +226,7 @@ async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum ControlResponseType {
     SyncResponse,
     AsyncResponse(String),
@@ -250,12 +273,15 @@ async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecErr
     }
 
     let line = read_line(reader).await?;
-    match SyncRegex.captures(&line) {
+    match AsyncRegex.captures(&line) {
         Some(captures) => Ok(captures.into()),
-        None => Err(TorError::ProtocolError(format!(
-            "Unknown response: {}",
-            line
-        ))),
+        None => match SyncRegex.captures(&line) {
+            Some(captures) => Ok(captures.into()),
+            None => Err(TorError::ProtocolError(format!(
+                "Unknown response: {}",
+                line
+            ))),
+        },
     }
 }
 
@@ -415,7 +441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_authenticate() -> Result<(), Box<dyn std::error::Error>> {
         let (client, server) = create_mock().await?;
         let mut server = Framed::new(server, LinesCodec::new());
         server.send("250 OK").await?;
@@ -433,6 +459,28 @@ mod tests {
             TorError::AuthenticationError("Oops".into()),
             result.unwrap_err()
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_response() -> Result<(), Box<dyn std::error::Error>> {
+        let (client, server) = create_mock().await?;
+        let mut server = Framed::new(server, LinesCodec::new());
+        let mut tor = TorControlConnection::connect(client);
+        let receiver = tor.register_for_async_response("FOO")?;
+        let join_handle = tokio::spawn(async move {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            server.send("615 FOO Something").await.unwrap();
+        });
+        let control_response = receiver.await?;
+        join_handle.await?;
+        assert_eq!(615, control_response.code);
+        assert_eq!(
+            ControlResponseType::AsyncResponse("FOO".to_string()),
+            control_response.response_type
+        );
+        assert_eq!("Something", &control_response.response[0]);
 
         Ok(())
     }
