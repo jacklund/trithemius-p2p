@@ -1,8 +1,10 @@
 use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::collections::HashMap;
 use std::marker::Send;
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, WriteHalf};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
 pub struct OnionService {
@@ -57,19 +59,16 @@ impl TorAuthentication {
         match self {
             TorAuthentication::Null => {
                 connection.write("AUTHENTICATE").await?;
-                let mut reader = connection.reader.take().unwrap();
-                match read_control_response(&mut reader).await {
+                let result = match connection.read_sync_response().await {
                     Ok(control_response) => match control_response.code {
                         250 => Ok(()),
                         _ => Err(TorError::AuthenticationError(
                             control_response.response.join(" "),
                         )),
                     },
-                    Err(error) => {
-                        connection.reader = Some(reader);
-                        Err(error)
-                    }
-                }
+                    Err(error) => Err(error),
+                };
+                result
             }
             _ => Err(TorError::authentication_error(
                 "Haven't implemented that authentication method yet",
@@ -82,16 +81,49 @@ pub struct TorControlConnection<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static,
 {
-    reader: Option<FramedRead<ReadHalf<S>, LinesCodec>>,
     writer: FramedWrite<WriteHalf<S>, LinesCodec>,
+    registration_sender: mpsc::UnboundedSender<(String, oneshot::Sender<ControlResponse>)>,
+    sync_receiver: mpsc::UnboundedReceiver<ControlResponse>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnection<S> {
     fn connect(stream: S) -> Self {
         let (reader, writer) = tokio::io::split(stream);
+        let (registration_sender, mut registration_receiver) = mpsc::unbounded_channel();
+        let (sync_sender, mut sync_receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut async_map = HashMap::<String, oneshot::Sender<ControlResponse>>::new();
+            let mut reader = FramedRead::new(reader, LinesCodec::new());
+            loop {
+                tokio::select! {
+                    control_response = read_control_response(&mut reader) => {
+                        let control_response = control_response.unwrap();
+                        match control_response.response_type {
+                            ControlResponseType::AsyncResponse(ref keyword) => {
+                                match async_map.remove(keyword) {
+                                    Some(sender) => {
+                                        sender.send(control_response);
+                                    }
+                                    None => {
+                                        panic!("Got response without a registered callback!");
+                                    }
+                                }
+                            },
+                            ControlResponseType::SyncResponse => {
+                                sync_sender.send(control_response);
+                            },
+                        }
+                    },
+                    Some((keyword, sender)) = registration_receiver.recv() => {
+                        async_map.insert(keyword, sender);
+                    }
+                };
+            }
+        });
         Self {
-            reader: Some(FramedRead::new(reader, LinesCodec::new())),
             writer: FramedWrite::new(writer, LinesCodec::new()),
+            registration_sender,
+            sync_receiver,
         }
     }
 
@@ -101,16 +133,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
     }
 
     async fn authenticate(&mut self, method: TorAuthentication) -> Result<(), TorError> {
-        method.authenticate(self).await
+        method.authenticate(self).await?;
+        Ok(())
     }
 
-    async fn start_read_loop(&mut self) {
-        let mut reader = self.reader.take().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let control_response = read_control_response(&mut reader).await.unwrap();
-            }
-        });
+    async fn read_sync_response(&mut self) -> Result<ControlResponse, TorError> {
+        match self.sync_receiver.recv().await {
+            Some(control_response) => Ok(control_response),
+            None => Err(TorError::protocol_error(
+                "Got unexpected EOF on sync_receiver",
+            )),
+        }
+    }
+
+    async fn register_for_async_response(
+        &mut self,
+        keyword: &str,
+    ) -> Result<oneshot::Receiver<ControlResponse>, TorError> {
+        let (sender, receiver) = oneshot::channel();
+        self.registration_sender
+            .send((keyword.to_string(), sender))
+            .unwrap();
+        Ok(receiver)
     }
 
     // async fn create_transient_onion_service(
@@ -159,11 +203,13 @@ async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>
     }
 }
 
+#[derive(Debug)]
 enum ControlResponseType {
     SyncResponse,
     AsyncResponse(String),
 }
 
+#[derive(Debug)]
 struct ControlResponse {
     code: u16,
     indicator: char,
