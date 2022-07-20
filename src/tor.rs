@@ -48,6 +48,12 @@ impl From<std::io::Error> for TorError {
     }
 }
 
+impl From<oneshot::error::RecvError> for TorError {
+    fn from(error: oneshot::error::RecvError) -> TorError {
+        TorError::IOError(error.to_string())
+    }
+}
+
 impl From<LinesCodecError> for TorError {
     fn from(error: LinesCodecError) -> TorError {
         match error {
@@ -70,17 +76,13 @@ impl TorAuthentication {
     ) -> Result<(), TorError> {
         match self {
             TorAuthentication::Null => {
-                connection.write("AUTHENTICATE").await?;
-                let result = match connection.read_sync_response().await {
-                    Ok(control_response) => match control_response.code {
-                        250 => Ok(()),
-                        _ => Err(TorError::AuthenticationError(
-                            control_response.response.join(" "),
-                        )),
-                    },
+                match connection.send_sync_command("AUTHENTICATE", None).await {
+                    Ok(_) => Ok(()),
+                    Err(TorError::ProtocolError(error)) => {
+                        Err(TorError::AuthenticationError(error))
+                    }
                     Err(error) => Err(error),
-                };
-                result
+                }
             }
             _ => Err(TorError::authentication_error(
                 "Haven't implemented that authentication method yet",
@@ -169,51 +171,86 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
         }
     }
 
-    fn register_for_async_response(
+    async fn register_for_async_response(
         &mut self,
-        keyword: &str,
-    ) -> Result<oneshot::Receiver<ControlResponse>, TorError> {
-        let (sender, receiver) = oneshot::channel();
-        self.registration_sender
-            .send((keyword.to_string(), sender))
-            .unwrap();
-        Ok(receiver)
+        keywords: &[&str],
+    ) -> Result<Vec<oneshot::Receiver<ControlResponse>>, TorError> {
+        self.write(&format!("SETEVENTS {}", keywords.join(" ")))
+            .await?;
+        let mut receivers = vec![];
+        for keyword in keywords {
+            let (sender, receiver) = oneshot::channel();
+            self.registration_sender
+                .send((keyword.to_string(), sender))
+                .unwrap();
+            receivers.push(receiver);
+        }
+        Ok(receivers)
     }
 
-    // async fn create_transient_onion_service(
-    //     &mut self,
-    //     virt_port: u16,
-    //     target_port: u16,
-    // ) -> Result<OnionService, TorError> {
-    //     lazy_static! {
-    //         static ref RE: Regex = Regex::new(r"^[^=]*=(?P<value>.*)$").unwrap();
-    //     }
-    //     self.write(&format!(
-    //         "ADD_ONION NEW:BEST Flags=DiscardPK Port={},{}",
-    //         virt_port, target_port
-    //     ))
-    //     .await?;
-    //     let control_response = read_control_response(&mut self.reader.unwrap()).await?;
-    //     match control_response.code {
-    //         250 => match RE.captures(&control_response.response[0]) {
-    //             Some(captures) => Ok(OnionService {
-    //                 virt_port,
-    //                 target_port,
-    //                 service_id: captures["value"].into(),
-    //             }),
-    //             None => Err(TorError::ProtocolError(format!(
-    //                 "Unexpected response: {} {}",
-    //                 control_response.code,
-    //                 control_response.response.join(" "),
-    //             ))),
-    //         },
-    //         _ => Err(TorError::ProtocolError(format!(
-    //             "Unexpected response: {} {}",
-    //             control_response.code,
-    //             control_response.response.join(" "),
-    //         ))),
-    //     }
-    // }
+    async fn send_sync_command(
+        &mut self,
+        command: &str,
+        arguments: Option<String>,
+    ) -> Result<ControlResponse, TorError> {
+        match arguments {
+            None => self.write(&format!("{}", command)).await?,
+            Some(arguments) => self.write(&format!("{} {}", command, arguments)).await?,
+        };
+        match self.read_sync_response().await {
+            Ok(control_response) => match control_response.code {
+                250 | 251 => Ok(control_response),
+                _ => Err(TorError::ProtocolError(control_response.response.join(" "))),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn send_async_command(
+        &mut self,
+        command: &str,
+        keywords: &[&str],
+        arguments: Option<String>,
+    ) -> Result<Vec<ControlResponse>, TorError> {
+        let receivers = self.register_for_async_response(keywords).await?;
+        let mut responses = vec![];
+        for receiver in receivers {
+            responses.push(receiver.await?);
+        }
+
+        Ok(responses)
+    }
+
+    async fn create_transient_onion_service(
+        &mut self,
+        virt_port: u16,
+        target_port: u16,
+    ) -> Result<OnionService, TorError> {
+        let control_response = self
+            .send_sync_command(
+                "ADD_ONION",
+                Some(format!(
+                    "NEW:BEST Flags=DiscardPK Port={},{}",
+                    virt_port, target_port
+                )),
+            )
+            .await?;
+        lazy_static! {
+            static ref RE: Regex = Regex::new(r"^[^=]*=(?P<value>.*)$").unwrap();
+        }
+        match RE.captures(&control_response.response[0]) {
+            Some(captures) => Ok(OnionService {
+                virt_port,
+                target_port,
+                service_id: captures["value"].into(),
+            }),
+            None => Err(TorError::ProtocolError(format!(
+                "Unexpected response: {} {}",
+                control_response.code,
+                control_response.response.join(" "),
+            ))),
+        }
+    }
 }
 
 async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
@@ -468,12 +505,12 @@ mod tests {
         let (client, server) = create_mock().await?;
         let mut server = Framed::new(server, LinesCodec::new());
         let mut tor = TorControlConnection::connect(client);
-        let receiver = tor.register_for_async_response("FOO")?;
+        let mut receivers = tor.register_for_async_response(&["FOO"]).await?;
         let join_handle = tokio::spawn(async move {
             std::thread::sleep(std::time::Duration::from_millis(100));
             server.send("615 FOO Something").await.unwrap();
         });
-        let control_response = receiver.await?;
+        let control_response = receivers.remove(0).await?;
         join_handle.await?;
         assert_eq!(615, control_response.code);
         assert_eq!(
