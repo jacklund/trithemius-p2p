@@ -1,3 +1,4 @@
+use crate::tor::{auth::TorAuthentication, error::TorError};
 use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -14,80 +15,120 @@ pub struct OnionService {
 }
 
 #[derive(Debug, PartialEq)]
-enum TorError {
-    AuthenticationError(String),
-    ProtocolError(String),
-    IOError(String),
+enum ControlResponseType {
+    SyncResponse,
+    AsyncResponse(String),
 }
 
-impl std::fmt::Display for TorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Self::AuthenticationError(error) => write!(f, "Authentication Error: {}", error),
-            Self::ProtocolError(error) => write!(f, "Protocol Error: {}", error),
-            Self::IOError(error) => write!(f, "IO Error: {}", error),
+#[derive(Debug)]
+pub struct ControlResponse {
+    code: u16,
+    indicator: char,
+    response_type: ControlResponseType,
+    response: Vec<String>,
+}
+
+impl<'a> From<regex::Captures<'a>> for ControlResponse {
+    fn from(captures: regex::Captures) -> Self {
+        let code = captures["code"].parse::<u16>().unwrap();
+        let indicator = captures["type"].chars().last().unwrap();
+        let response_type = if code >= 600 {
+            ControlResponseType::AsyncResponse(captures["keyword"].to_string())
+        } else {
+            ControlResponseType::SyncResponse
+        };
+        let response = vec![captures["response"].to_string()];
+
+        Self {
+            code,
+            indicator,
+            response_type,
+            response,
         }
     }
 }
 
-impl std::error::Error for TorError {}
-
-impl TorError {
-    fn authentication_error(msg: &str) -> TorError {
-        TorError::AuthenticationError(msg.to_string())
+async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+    reader: &mut S,
+) -> Result<ControlResponse, TorError> {
+    lazy_static! {
+        static ref AsyncRegex: Regex = Regex::new(
+            r"^(?P<code>6\d{2})(?P<type>[\- +])(?P<keyword>[^ ]*) (?P<response>.*)\r?\n?$"
+        )
+        .unwrap();
+        static ref SyncRegex: Regex =
+            Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
     }
 
-    fn protocol_error(msg: &str) -> TorError {
-        TorError::ProtocolError(msg.to_string())
-    }
-}
-
-impl From<std::io::Error> for TorError {
-    fn from(error: std::io::Error) -> TorError {
-        TorError::IOError(error.to_string())
-    }
-}
-
-impl From<oneshot::error::RecvError> for TorError {
-    fn from(error: oneshot::error::RecvError) -> TorError {
-        TorError::IOError(error.to_string())
-    }
-}
-
-impl From<LinesCodecError> for TorError {
-    fn from(error: LinesCodecError) -> TorError {
-        match error {
-            LinesCodecError::MaxLineLengthExceeded => TorError::ProtocolError(error.to_string()),
-            LinesCodecError::Io(error) => error.into(),
-        }
+    let line = read_line(reader).await?;
+    match AsyncRegex.captures(&line) {
+        Some(captures) => Ok(captures.into()),
+        None => match SyncRegex.captures(&line) {
+            Some(captures) => Ok(captures.into()),
+            None => Err(TorError::ProtocolError(format!(
+                "Unknown response: {}",
+                line
+            ))),
+        },
     }
 }
 
-pub enum TorAuthentication {
-    Null,
-    SafeCookie(String),     // Cookie String
-    HashedPassword(String), // Password
-}
-
-impl TorAuthentication {
-    async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static>(
-        &self,
-        connection: &mut TorControlConnection<S>,
-    ) -> Result<(), TorError> {
-        match self {
-            TorAuthentication::Null => {
-                match connection.send_sync_command("AUTHENTICATE", None).await {
-                    Ok(_) => Ok(()),
-                    Err(TorError::ProtocolError(error)) => {
-                        Err(TorError::AuthenticationError(error))
-                    }
-                    Err(error) => Err(error),
+async fn read_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+    reader: &mut S,
+) -> Result<ControlResponse, TorError> {
+    let mut control_response = parse_control_response(reader).await?;
+    match control_response.indicator {
+        ' ' => Ok(control_response),
+        '-' => {
+            let mut aggregated_response = vec![control_response.response[0].clone()];
+            loop {
+                let control_response = parse_control_response(reader).await?;
+                match control_response.indicator {
+                    ' ' => match control_response.code {
+                        250 => break,
+                        _ => Err(TorError::ProtocolError(format!(
+                            "Unexpected code {} during mid response",
+                            control_response.code,
+                        )))?,
+                    },
+                    '-' => aggregated_response.extend(control_response.response),
+                    _ => Err(TorError::protocol_error(
+                        "Unexpected response type during mid response",
+                    ))?,
                 }
             }
-            _ => Err(TorError::authentication_error(
-                "Haven't implemented that authentication method yet",
-            )),
+            control_response.response = aggregated_response;
+            Ok(control_response)
         }
+        '+' => {
+            let mut response = vec![control_response.response[0].clone()];
+            loop {
+                let line = read_line(reader).await?;
+                if line == "." {
+                    break;
+                }
+                response.push(line);
+            }
+            control_response.response = response;
+            Ok(control_response)
+        }
+        _ => Err(TorError::ProtocolError(format!(
+            "Unexpected response type '{}': {}{}{}",
+            control_response.indicator,
+            control_response.code,
+            control_response.indicator,
+            control_response.response.join(" "),
+        ))),
+    }
+}
+
+async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+    reader: &mut S,
+) -> Result<String, TorError> {
+    match reader.next().await {
+        Some(Ok(line)) => Ok(line),
+        Some(Err(error)) => Err(error.into()),
+        None => Err(TorError::protocol_error("Unexpected EOF on stream")),
     }
 }
 
@@ -188,7 +229,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
         Ok(receivers)
     }
 
-    async fn send_sync_command(
+    pub async fn send_sync_command(
         &mut self,
         command: &str,
         arguments: Option<String>,
@@ -250,124 +291,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
                 control_response.response.join(" "),
             ))),
         }
-    }
-}
-
-async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
-    reader: &mut S,
-) -> Result<String, TorError> {
-    match reader.next().await {
-        Some(Ok(line)) => Ok(line),
-        Some(Err(error)) => Err(error.into()),
-        None => Err(TorError::protocol_error("Unexpected EOF on stream")),
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum ControlResponseType {
-    SyncResponse,
-    AsyncResponse(String),
-}
-
-#[derive(Debug)]
-struct ControlResponse {
-    code: u16,
-    indicator: char,
-    response_type: ControlResponseType,
-    response: Vec<String>,
-}
-
-impl<'a> From<regex::Captures<'a>> for ControlResponse {
-    fn from(captures: regex::Captures) -> Self {
-        let code = captures["code"].parse::<u16>().unwrap();
-        let indicator = captures["type"].chars().last().unwrap();
-        let response_type = if code >= 600 {
-            ControlResponseType::AsyncResponse(captures["keyword"].to_string())
-        } else {
-            ControlResponseType::SyncResponse
-        };
-        let response = vec![captures["response"].to_string()];
-
-        Self {
-            code,
-            indicator,
-            response_type,
-            response,
-        }
-    }
-}
-
-async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
-    reader: &mut S,
-) -> Result<ControlResponse, TorError> {
-    lazy_static! {
-        static ref AsyncRegex: Regex = Regex::new(
-            r"^(?P<code>6\d{2})(?P<type>[\- +])(?P<keyword>[^ ]*) (?P<response>.*)\r?\n?$"
-        )
-        .unwrap();
-        static ref SyncRegex: Regex =
-            Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
-    }
-
-    let line = read_line(reader).await?;
-    match AsyncRegex.captures(&line) {
-        Some(captures) => Ok(captures.into()),
-        None => match SyncRegex.captures(&line) {
-            Some(captures) => Ok(captures.into()),
-            None => Err(TorError::ProtocolError(format!(
-                "Unknown response: {}",
-                line
-            ))),
-        },
-    }
-}
-
-async fn read_control_response<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
-    reader: &mut S,
-) -> Result<ControlResponse, TorError> {
-    let mut control_response = parse_control_response(reader).await?;
-    match control_response.indicator {
-        ' ' => Ok(control_response),
-        '-' => {
-            let mut aggregated_response = vec![control_response.response[0].clone()];
-            loop {
-                let control_response = parse_control_response(reader).await?;
-                match control_response.indicator {
-                    ' ' => match control_response.code {
-                        250 => break,
-                        _ => Err(TorError::ProtocolError(format!(
-                            "Unexpected code {} during mid response",
-                            control_response.code,
-                        )))?,
-                    },
-                    '-' => aggregated_response.extend(control_response.response),
-                    _ => Err(TorError::protocol_error(
-                        "Unexpected response type during mid response",
-                    ))?,
-                }
-            }
-            control_response.response = aggregated_response;
-            Ok(control_response)
-        }
-        '+' => {
-            let mut response = vec![control_response.response[0].clone()];
-            loop {
-                let line = read_line(reader).await?;
-                if line == "." {
-                    break;
-                }
-                response.push(line);
-            }
-            control_response.response = response;
-            Ok(control_response)
-        }
-        _ => Err(TorError::ProtocolError(format!(
-            "Unexpected response type '{}': {}{}{}",
-            control_response.indicator,
-            control_response.code,
-            control_response.indicator,
-            control_response.response.join(" "),
-        ))),
     }
 }
 
