@@ -122,7 +122,7 @@ async fn read_control_response<S: StreamExt<Item = Result<String, LinesCodecErro
     }
 }
 
-async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
+pub(crate) async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin>(
     reader: &mut S,
 ) -> Result<String, TorError> {
     match reader.next().await {
