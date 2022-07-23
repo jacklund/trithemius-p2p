@@ -155,12 +155,10 @@ impl std::default::Default for ED25519Certificate {
 const ED25519_CERTIFICATE_BEGIN: &str = "-----BEGIN ED25519 CERT-----";
 const ED25519_CERTIFICATE_END: &str = "-----END ED25519 CERT-----";
 
-pub async fn read_ed25519_certificate<S: AsyncRead + Unpin>(
+pub async fn read_ed25519_certificate_data<S: AsyncRead + Unpin>(
     stream: S,
-) -> Result<ED25519Certificate, Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut framed = FramedRead::new(stream, LinesCodec::new());
-
-    // TODO: Use Serde?
     let mut lines = vec![];
     loop {
         let line = read_line(&mut framed).await?;
@@ -172,39 +170,67 @@ pub async fn read_ed25519_certificate<S: AsyncRead + Unpin>(
             lines.push(line);
         }
     }
-    let mut certificate = ED25519Certificate::default();
-    let bytes = base64::decode(lines.join(""))?;
-    let bytes_to_sign = &bytes.clone()[..bytes.len() - 64];
-    let mut cursor = std::io::Cursor::new(bytes);
-    certificate.version = cursor.read_u8().unwrap();
-    certificate.cert_type = cursor.read_u8().unwrap().try_into()?;
+    Ok(base64::decode(lines.join(""))?)
+}
 
-    // TODO: Refactor?
-    let hours_since_epoch = cursor.read_u32::<BigEndian>().unwrap();
+pub async fn parse_ed25519_certificate<S: AsyncRead + Unpin>(
+    stream: S,
+) -> Result<ED25519Certificate, Box<dyn std::error::Error>> {
+    // Read the certificate
+    let bytes = read_ed25519_certificate_data(stream).await?;
+
+    // Set aside the bytes used for signature
+    let bytes_to_sign = &bytes.clone()[..bytes.len() - 64];
+
+    // Parse the data
+    let mut certificate = ED25519Certificate::default();
+    let mut cursor = std::io::Cursor::new(bytes);
+    certificate.version = cursor.read_u8()?;
+    certificate.cert_type = cursor.read_u8()?.try_into()?;
+
+    // Parse the expiration date, which is encoded as a long int as hourse since the epoch
+    let hours_since_epoch = cursor.read_u32::<BigEndian>()?;
     certificate.expiration_date = Utc.timestamp((3600 * hours_since_epoch).into(), 0);
 
-    certificate.key_type = cursor.read_u8().unwrap().try_into()?;
+    // Cert key type
+    certificate.key_type = cursor.read_u8()?.try_into()?;
+
+    // Read the certified key
     let mut buf: [u8; 32] = [0; 32];
     cursor.read_exact(&mut buf)?;
     certificate.certified_key = CertifiedKey::PublicKey(PublicKey::from_bytes(&buf)?);
-    let num_extensions = cursor.read_u8().unwrap();
+
+    // Read the extensions
+    let num_extensions = cursor.read_u8()?;
     for _ in 0..num_extensions {
         certificate
             .extensions
             .push(Extension::from_bytes(&mut cursor)?);
     }
+
+    // Read the signature
     let mut buf: [u8; 64] = [0; 64];
     cursor.read_exact(&mut buf)?;
     certificate.signature = buf.into();
 
-    // TODO: Use flags
-    match &certificate.extensions[0] {
-        Extension::SignedWithKey { flags, public_key } => {
-            match public_key.verify(&bytes_to_sign, &certificate.signature) {
-                Ok(()) => Ok(certificate),
+    let mut verified = false;
+    for extension in &certificate.extensions {
+        match extension {
+            Extension::SignedWithKey {
+                flags: _,
+                public_key,
+            } => match public_key.verify(&bytes_to_sign, &certificate.signature) {
+                Ok(()) => {
+                    verified = true;
+                }
                 Err(error) => Err(error)?,
-            }
+            },
         }
+    }
+
+    match verified {
+        true => Ok(certificate),
+        false => Err(TorError::protocol_error("Certificate not verified"))?,
     }
 }
 
@@ -213,14 +239,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_read_ed25519_certificate() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_parse_ed25519_certificate() -> Result<(), Box<dyn std::error::Error>> {
         const CERT_DATA: &str = "-----BEGIN ED25519 CERT-----\n\
             AQgABwb/AffeimvM/+cAQYvNL0GE8HplhxLTWfkVGZtgI0k/Q7yeAQAgBABsS3Ux\n\
             NJobxQ6fs1/DqCETaUhG5vwDAoOVq7fol9CGi30lG+HIbtguSf/TN7wEdAPLF8BQ\n\
             WfzZnex9NDI8oBHAT0oQiaUzHcQlfOlrUEfNti3IWSQD3lLEo0CSCM6GgAc=\n\
             -----END ED25519 CERT-----";
         let cursor = std::io::Cursor::new(CERT_DATA);
-        let certificate = read_ed25519_certificate(cursor).await?;
+        let certificate = parse_ed25519_certificate(cursor).await?;
         println!("certificate = {:?}", certificate);
 
         assert_eq!(1, certificate.version);
