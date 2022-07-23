@@ -94,6 +94,12 @@ impl Renderer {
     }
 }
 
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
         self.terminal
@@ -256,7 +262,7 @@ impl UI {
                             self.handle_command(engine, command.split_whitespace())
                         } else {
                             let message = ChatMessage::new(self.my_identity, input.clone());
-                            self.add_message(message.clone());
+                            self.add_message(message);
                             Ok(Some(InputEvent::Message {
                                 topic: IdentTopic::new("chat"), // TODO: Change this
                                 message: input.into_bytes(),

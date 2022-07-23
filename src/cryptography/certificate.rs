@@ -4,12 +4,14 @@ use byteorder::{BigEndian, ReadBytesExt};
 use chrono::{DateTime, TimeZone, Utc};
 use ed25519_dalek::Verifier;
 use ed25519_dalek::{PublicKey, Signature, PUBLIC_KEY_LENGTH};
+use futures::stream::Stream;
+use futures::{SinkExt, StreamExt};
 use std::io::Read;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 #[derive(Debug)]
-enum CertifiedKey {
+pub enum CertifiedKey {
     PublicKey(PublicKey),
 }
 
@@ -74,7 +76,7 @@ impl TryFrom<u8> for SignedKeyType {
 }
 
 #[derive(Debug)]
-enum ExtensionFlags {
+pub enum ExtensionFlags {
     None = 0,
     IncludeSigningKey = 1,
 }
@@ -97,7 +99,7 @@ impl TryFrom<u8> for ExtensionFlags {
 }
 
 #[derive(Debug)]
-enum Extension {
+pub enum Extension {
     SignedWithKey {
         flags: ExtensionFlags,
         public_key: PublicKey,
@@ -127,13 +129,13 @@ impl Extension {
 
 #[derive(Debug)]
 pub struct ED25519Certificate {
-    version: u8,
-    cert_type: CertificateType,
-    expiration_date: DateTime<Utc>,
-    key_type: SignedKeyType,
-    certified_key: CertifiedKey,
-    extensions: Vec<Extension>,
-    signature: Signature,
+    pub version: u8,
+    pub cert_type: CertificateType,
+    pub expiration_date: DateTime<Utc>,
+    pub key_type: SignedKeyType,
+    pub certified_key: CertifiedKey,
+    pub extensions: Vec<Extension>,
+    pub signature: Signature,
 }
 
 impl std::default::Default for ED25519Certificate {
@@ -155,13 +157,14 @@ impl std::default::Default for ED25519Certificate {
 const ED25519_CERTIFICATE_BEGIN: &str = "-----BEGIN ED25519 CERT-----";
 const ED25519_CERTIFICATE_END: &str = "-----END ED25519 CERT-----";
 
-pub async fn read_ed25519_certificate_data<S: AsyncRead + Unpin>(
-    stream: S,
+pub async fn read_ed25519_certificate_data<
+    S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin,
+>(
+    stream: &mut S,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut framed = FramedRead::new(stream, LinesCodec::new());
     let mut lines = vec![];
     loop {
-        let line = read_line(&mut framed).await?;
+        let line = read_line(stream).await?;
         if line == ED25519_CERTIFICATE_BEGIN {
             continue;
         } else if line == ED25519_CERTIFICATE_END {
@@ -173,8 +176,10 @@ pub async fn read_ed25519_certificate_data<S: AsyncRead + Unpin>(
     Ok(base64::decode(lines.join(""))?)
 }
 
-pub async fn parse_ed25519_certificate<S: AsyncRead + Unpin>(
-    stream: S,
+pub async fn parse_ed25519_certificate<
+    S: StreamExt<Item = Result<String, LinesCodecError>> + Unpin,
+>(
+    stream: &mut S,
 ) -> Result<ED25519Certificate, Box<dyn std::error::Error>> {
     // Read the certificate
     let bytes = read_ed25519_certificate_data(stream).await?;
@@ -237,6 +242,7 @@ pub async fn parse_ed25519_certificate<S: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_util::codec::{FramedRead, LinesCodec};
 
     #[tokio::test]
     async fn test_parse_ed25519_certificate() -> Result<(), Box<dyn std::error::Error>> {
@@ -245,8 +251,8 @@ mod tests {
             NJobxQ6fs1/DqCETaUhG5vwDAoOVq7fol9CGi30lG+HIbtguSf/TN7wEdAPLF8BQ\n\
             WfzZnex9NDI8oBHAT0oQiaUzHcQlfOlrUEfNti3IWSQD3lLEo0CSCM6GgAc=\n\
             -----END ED25519 CERT-----";
-        let cursor = std::io::Cursor::new(CERT_DATA);
-        let certificate = parse_ed25519_certificate(cursor).await?;
+        let mut framed = FramedRead::new(CERT_DATA.as_bytes(), LinesCodec::new());
+        let certificate = parse_ed25519_certificate(&mut framed).await?;
         println!("certificate = {:?}", certificate);
 
         assert_eq!(1, certificate.version);
