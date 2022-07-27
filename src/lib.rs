@@ -1,5 +1,5 @@
-pub mod cryptography;
 pub mod engine_event;
+pub mod socks5;
 pub mod tor;
 
 use async_trait::async_trait;
@@ -7,7 +7,7 @@ use chrono::{DateTime, Local};
 use engine_event::EngineEvent;
 use futures::stream::FusedStream;
 use libp2p::{
-    core::{connection::ListenerId, muxing::StreamMuxerBox, transport::Boxed, upgrade},
+    core::{muxing::StreamMuxerBox, transport::Boxed, transport::ListenerId, upgrade},
     futures::StreamExt,
     gossipsub::{
         error::{PublishError, SubscriptionError},
@@ -19,14 +19,15 @@ use libp2p::{
     noise,
     ping::{Ping, PingConfig},
     swarm::{DialError, NetworkBehaviour, Swarm, SwarmBuilder},
-    // `TokioTcpConfig` is available through the `tcp-tokio` feature.
-    tcp::TokioTcpConfig,
+    // `TokioTcpTransport` is available through the `tcp-tokio` feature.
+    tcp::TokioTcpTransport,
     Multiaddr,
     NetworkBehaviour,
     PeerId,
     Transport,
     TransportError,
 };
+use libp2p_tcp::GenTcpConfig;
 use log::debug;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -68,8 +69,7 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
         .into_authentic(id_keys)
         .expect("Signing libp2p-noise static DH keypair failed.");
 
-    TokioTcpConfig::new()
-        .nodelay(true)
+    TokioTcpTransport::new(GenTcpConfig::default().nodelay(true))
         .upgrade(upgrade::Version::V1)
         .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
         .multiplex(mplex::MplexConfig::new())

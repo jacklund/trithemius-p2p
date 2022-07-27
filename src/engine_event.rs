@@ -1,6 +1,6 @@
 use crate::ChatMessage;
 use libp2p::{
-    core::{connection::ListenerId, either::EitherError, ConnectedPoint},
+    core::{either::EitherError, transport::ListenerId, ConnectedPoint},
     gossipsub::{error::GossipsubHandlerError, GossipsubEvent, MessageId, TopicHash},
     mdns::MdnsEvent,
     ping::{Failure, PingEvent},

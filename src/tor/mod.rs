@@ -1,4 +1,3 @@
 pub mod auth;
-pub mod connection;
+pub mod control_connection;
 pub mod error;
-pub mod hs_descriptor;
