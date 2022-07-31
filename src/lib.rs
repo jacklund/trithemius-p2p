@@ -1,5 +1,4 @@
 pub mod engine_event;
-pub mod socks5;
 pub mod tor;
 
 use async_trait::async_trait;
