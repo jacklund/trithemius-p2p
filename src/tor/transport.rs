@@ -8,12 +8,13 @@ use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
-use tor_stream::TorStream;
+use tokio_socks::tcp::Socks5Stream;
 
 #[derive(Debug)]
 pub enum TorTransportError<TErr> {
     Transport(TErr),
     MultiaddrNotSupported(Multiaddr),
+    SocksError(tokio_socks::Error),
 }
 
 impl<TErr> fmt::Display for TorTransportError<TErr>
@@ -26,6 +27,7 @@ where
             TorTransportError::MultiaddrNotSupported(a) => {
                 write!(f, "Unsupported resolved address: {}", a)
             }
+            TorTransportError::SocksError(err) => write!(f, "{}", err),
         }
     }
 }
@@ -96,11 +98,9 @@ where
         let inner = self.inner.clone();
         Ok(async move {
             if let Some((host, port)) = to_onion3_domain(dest_addr.clone()) {
-                match TorStream::connect_with_address(proxy_addr, (host.as_str(), port)) {
-                    Ok(connection) => Ok(TcpStream(tokio::net::TcpStream::from_std(
-                        connection.into_inner(),
-                    )?)),
-                    Err(error) => Err(TorTransportError::Transport(error)),
+                match Socks5Stream::connect(proxy_addr, (host, port)).await {
+                    Ok(connection) => Ok(TcpStream(connection.into_inner())),
+                    Err(error) => Err(TorTransportError::SocksError(error)),
                 }
             } else {
                 let dial = inner.lock().dial(dest_addr);
@@ -192,6 +192,7 @@ mod tests {
             TokioTcpTransport::new(GenTcpConfig::default().nodelay(true)),
             "127.0.0.1:5000".parse().unwrap(),
         )?;
+
         let mut stream = transport
             .dial(
                 "/onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234"
