@@ -72,8 +72,9 @@ fn to_onion3_domain<'a>(addr: Multiaddr) -> Option<(String, u16)> {
 
 impl<T> Transport for TorTransportWrapper<T>
 where
-    T: Transport<Output = TcpStream, Error = std::io::Error> + Send + Unpin + 'static,
+    T: Transport<Output = TcpStream> + Send + Unpin + 'static,
     T::Dial: Send,
+    T::Error: Send,
 {
     type Output = T::Output;
     type Error = TorTransportError<T::Error>;
@@ -166,7 +167,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    async fn test_socks5_connect() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_tor_connect() -> Result<(), Box<dyn std::error::Error>> {
         let server = Server::bind("127.0.0.1:5000", Arc::new(NoAuth))
             .await
             .unwrap();

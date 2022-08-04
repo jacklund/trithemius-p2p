@@ -1,6 +1,7 @@
 pub mod engine_event;
 pub mod tor;
 
+use crate::tor::transport::TorTransportWrapper;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use engine_event::EngineEvent;
@@ -26,10 +27,12 @@ use libp2p::{
     Transport,
     TransportError,
 };
+use libp2p_dns::TokioDnsConfig;
 use libp2p_tcp::GenTcpConfig;
 use log::debug;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 #[derive(NetworkBehaviour)]
@@ -68,11 +71,25 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
         .into_authentic(id_keys)
         .expect("Signing libp2p-noise static DH keypair failed.");
 
-    TokioTcpTransport::new(GenTcpConfig::default().nodelay(true))
-        .upgrade(upgrade::Version::V1)
-        .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
-        .multiplex(mplex::MplexConfig::new())
-        .boxed()
+    // We wrap the base libp2p tokio TCP transport inside the tokio DNS transport, inside our Tor
+    // wrapper. Tor wrapper has to be first, so that an onion address isn't resolved by the DNS
+    // layer. We need the DNS layer there in case we get a DNS hostname (unlikely, but possible).
+    TorTransportWrapper::new(
+        TokioDnsConfig::system(TokioTcpTransport::new(
+            GenTcpConfig::default().nodelay(true),
+        ))
+        .unwrap(), // TODO: Have this return a result so we don't have to unwrap here
+        ("127.0.0.1", 9050 as u16) // TODO: Configure the TOR SOCKS5 proxy address
+            .to_socket_addrs()
+            .unwrap()
+            .next()
+            .unwrap(),
+    )
+    .unwrap()
+    .upgrade(upgrade::Version::V1)
+    .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
+    .multiplex(mplex::MplexConfig::new())
+    .boxed()
 }
 
 #[async_trait]
