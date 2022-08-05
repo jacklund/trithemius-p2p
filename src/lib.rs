@@ -96,21 +96,21 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
 pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
     type Event;
 
-    fn handle_input(
+    async fn handle_input(
         &mut self,
         engine: &mut Engine,
         line: F::Item,
     ) -> Result<Option<InputEvent>, std::io::Error>;
 
-    fn handle_event(
+    async fn handle_event(
         &mut self,
         engine: &mut Engine,
         event: EngineEvent,
     ) -> Result<Option<EngineEvent>, std::io::Error>;
 
-    fn handle_error(&mut self, error_message: &str);
+    async fn handle_error(&mut self, error_message: &str);
 
-    fn update(&mut self) -> Result<(), std::io::Error>;
+    async fn update(&mut self) -> Result<(), std::io::Error>;
 }
 
 pub struct Engine {
@@ -205,7 +205,7 @@ impl Engine {
         loop {
             tokio::select! {
                 line = input_stream.select_next_some() => {
-                    match handler.handle_input(self, line)? {
+                    match handler.handle_input(self, line).await? {
                         Some(InputEvent::Message { topic, message }) => {
                             match self.publish(topic, message) {
                                 Ok(_message_id) => (),
@@ -223,11 +223,11 @@ impl Engine {
                 },
                 event = self.swarm().select_next_some() => {
                     debug!("Got event {:?}", event);
-                    handler.handle_event(self, event.into())?;
+                    handler.handle_event(self, event.into()).await?;
                 }
             }
 
-            handler.update()?;
+            handler.update().await?;
         }
     }
 }

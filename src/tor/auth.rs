@@ -9,9 +9,9 @@ pub enum TorAuthentication {
 }
 
 impl TorAuthentication {
-    pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static>(
+    pub async fn authenticate(
         &self,
-        connection: &mut TorControlConnection<S>,
+        connection: &mut TorControlConnection,
     ) -> Result<(), TorError> {
         match self {
             TorAuthentication::Null => match connection.send_command("AUTHENTICATE", None).await {

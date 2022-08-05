@@ -2,14 +2,15 @@ use crate::tor::{auth::TorAuthentication, error::TorError};
 use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::marker::Send;
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+use tokio::io::{ReadHalf, WriteHalf};
+use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
+#[derive(Debug)]
 pub struct OnionService {
-    virt_port: u16,
-    target_port: u16,
-    service_id: String,
+    pub virt_port: u16,
+    pub target_port: u16,
+    pub service_id: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -130,21 +131,19 @@ pub(crate) async fn read_line<S: StreamExt<Item = Result<String, LinesCodecError
     }
 }
 
-pub struct TorControlConnection<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static,
-{
-    reader: FramedRead<ReadHalf<S>, LinesCodec>,
-    writer: FramedWrite<WriteHalf<S>, LinesCodec>,
+pub struct TorControlConnection {
+    reader: FramedRead<ReadHalf<TcpStream>, LinesCodec>,
+    writer: FramedWrite<WriteHalf<TcpStream>, LinesCodec>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnection<S> {
-    fn connect(stream: S) -> Self {
+impl TorControlConnection {
+    pub async fn connect<A: ToSocketAddrs>(addrs: A) -> Result<Self, TorError> {
+        let stream = TcpStream::connect(addrs).await?;
         let (reader, writer) = tokio::io::split(stream);
-        Self {
+        Ok(Self {
             reader: FramedRead::new(reader, LinesCodec::new()),
             writer: FramedWrite::new(writer, LinesCodec::new()),
-        }
+        })
     }
 
     async fn write(&mut self, data: &str) -> Result<(), TorError> {
@@ -152,7 +151,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
         Ok(())
     }
 
-    async fn authenticate(&mut self, method: TorAuthentication) -> Result<(), TorError> {
+    pub async fn authenticate(&mut self, method: TorAuthentication) -> Result<(), TorError> {
         method.authenticate(self).await?;
         Ok(())
     }
@@ -179,7 +178,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Sync + Send + 'static> TorControlConnec
         }
     }
 
-    async fn create_transient_onion_service(
+    pub async fn create_transient_onion_service(
         &mut self,
         virt_port: u16,
         target_port: u16,

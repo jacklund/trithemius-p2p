@@ -8,7 +8,11 @@ use libp2p::PeerId;
 use log::debug;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use trithemiuslib::{engine_event::EngineEvent, ChatMessage, Engine, InputEvent};
+use trithemiuslib::{
+    engine_event::EngineEvent,
+    tor::{auth::TorAuthentication, control_connection::TorControlConnection},
+    ChatMessage, Engine, InputEvent,
+};
 
 use tui::backend::CrosstermBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -19,7 +23,7 @@ use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::Frame;
 use tui::Terminal;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 
 enum Level {
@@ -173,16 +177,59 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
-    fn handle_command<'a, I: Iterator<Item = &'a str>>(
+    fn parse_u16<'a>(
+        command_args: &mut VecDeque<&'a str>,
+    ) -> Result<Option<u16>, std::num::ParseIntError> {
+        command_args
+            .pop_front()
+            .and_then(|s| Some(s.parse::<u16>()))
+            .transpose()
+    }
+
+    async fn create_transient_onion_service(&mut self, virt_port: u16, target_port: u16) {
+        debug!("Calling TorControlConnection::connect");
+        match TorControlConnection::connect("127.0.0.1:9051").await {
+            Ok(mut connection) => {
+                if let Err(error) = connection.authenticate(TorAuthentication::Null).await {
+                    self.log_error(&format!("Error authenticating to Tor: {}", error));
+                    return;
+                }
+                debug!("Calling create_transient_onion_service");
+                match connection
+                    .create_transient_onion_service(virt_port, target_port)
+                    .await
+                {
+                    Ok(onion_service) => {
+                        debug!("Created onion service {:?}", onion_service);
+                        self.log_info(&format!(
+                            "Created onion service {}.onion:{}",
+                            onion_service.service_id, onion_service.virt_port
+                        ));
+                    }
+                    Err(error) => {
+                        debug!("Error connecting to Tor process: {}", error);
+                        self.log_error(&format!("Error connecting to Tor process: {}", error));
+                    }
+                }
+            }
+            Err(error) => {
+                self.log_error(&format!(
+                    "Got error on TorControlConnection::connect: {}",
+                    error
+                ));
+            }
+        }
+    }
+
+    async fn handle_command<'a>(
         &mut self,
         engine: &mut Engine,
-        mut command_args: I,
+        mut command_args: VecDeque<&'a str>,
     ) -> Result<Option<InputEvent>, std::io::Error> {
-        let command = command_args.next();
-        self.log_info(&format!("Got command '{:?}'", command));
+        let command = command_args.pop_front();
         match command {
             Some(command) => match command.to_ascii_lowercase().as_str() {
-                "subscribe" => match command_args.next() {
+                "subscribe" => match command_args.pop_front() {
                     Some(topic_name) => {
                         match engine.subscribe(topic_name) {
                             Ok(true) => {
@@ -202,7 +249,45 @@ impl UI {
                         Ok(None)
                     }
                 },
-                "unsubscribe" => match command_args.next() {
+                "create-onion-service" => {
+                    debug!("Got create-onion-service command");
+                    match Self::parse_u16(&mut command_args) {
+                        Ok(Some(virt_port)) => match Self::parse_u16(&mut command_args) {
+                            Ok(Some(target_port)) => {
+                                debug!(
+                                    "Got virt_port = {}, target_port = {}",
+                                    virt_port, target_port
+                                );
+                                self.create_transient_onion_service(virt_port, target_port)
+                                    .await;
+                                Ok(None)
+                            }
+                            Ok(None) => {
+                                debug!(
+                                    "Got virt_port = {}, target_port = {}",
+                                    virt_port, virt_port
+                                );
+                                self.create_transient_onion_service(virt_port, virt_port)
+                                    .await;
+                                Ok(None)
+                            }
+                            Err(error) => {
+                                debug!("Got error parsing virt_port: {}", error);
+                                self.log_error(&format!("Error parsing target_port: {}", error));
+                                Ok(None)
+                            }
+                        },
+                        Ok(None) => {
+                            self.log_error("Must specify a virtual port for create-onion-service");
+                            Ok(None)
+                        }
+                        Err(error) => {
+                            self.log_error(&format!("Error parsing virtual port: {}", error));
+                            Ok(None)
+                        }
+                    }
+                }
+                "unsubscribe" => match command_args.pop_front() {
                     Some(topic_name) => {
                         match engine.unsubscribe(topic_name) {
                             Ok(true) => {
@@ -234,7 +319,7 @@ impl UI {
         }
     }
 
-    pub fn handle_input_event(
+    pub async fn handle_input_event(
         &mut self,
         engine: &mut Engine,
         event: Event,
@@ -259,7 +344,8 @@ impl UI {
                 KeyCode::Enter => {
                     if let Some(input) = self.reset_input() {
                         if let Some(command) = input.strip_prefix('/') {
-                            self.handle_command(engine, command.split_whitespace())
+                            self.handle_command(engine, command.split_whitespace().collect())
+                                .await
                         } else {
                             let message = ChatMessage::new(self.my_identity, input.clone());
                             self.add_message(message);

@@ -11,6 +11,7 @@ use libp2p::{
     PeerId,
 };
 use log::{debug, LevelFilter};
+// use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
@@ -68,18 +69,18 @@ impl MyHandler {
 impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     type Event = TermEvent;
 
-    fn handle_input(
+    async fn handle_input(
         &mut self,
         engine: &mut Engine,
         event: Result<Self::Event, std::io::Error>,
     ) -> Result<Option<InputEvent>, std::io::Error> {
-        let event = self.ui.handle_input_event(engine, event?)?;
+        let event = self.ui.handle_input_event(engine, event?).await?;
         debug!("handle_input, got event {:?}", event);
 
         Ok(event)
     }
 
-    fn handle_event(
+    async fn handle_event(
         &mut self,
         engine: &mut Engine,
         event: EngineEvent,
@@ -181,11 +182,11 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
         })
     }
 
-    fn handle_error(&mut self, error_message: &str) {
+    async fn handle_error(&mut self, error_message: &str) {
         self.ui.log_error(error_message);
     }
 
-    fn update(&mut self) -> Result<(), std::io::Error> {
+    async fn update(&mut self) -> Result<(), std::io::Error> {
         debug!("Called handler::update()");
         self.renderer.render(&self.ui)
     }
