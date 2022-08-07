@@ -203,6 +203,8 @@ impl Engine {
         mut handler: H,
     ) -> Result<(), std::io::Error> {
         loop {
+            handler.update().await?;
+
             tokio::select! {
                 line = input_stream.select_next_some() => {
                     match handler.handle_input(self, line).await? {
@@ -226,8 +228,6 @@ impl Engine {
                     handler.handle_event(self, event.into()).await?;
                 }
             }
-
-            handler.update().await?;
         }
     }
 }
