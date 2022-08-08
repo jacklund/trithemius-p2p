@@ -178,16 +178,25 @@ impl Engine {
         &mut self,
         virt_port: u16,
         target_port: u16,
-    ) -> Result<OnionService, TorError> {
+    ) -> Result<OnionService, Box<dyn std::error::Error>> {
         self.get_tor_connection()
             .await?
             .authenticate(TorAuthentication::Null)
             .await?;
 
-        self.get_tor_connection()
+        let onion_service = self
+            .get_tor_connection()
             .await?
             .create_transient_onion_service(virt_port, target_port)
-            .await
+            .await?;
+
+        self.listen(
+            format!("/ip4/127.0.0.1/tcp/{}", target_port)
+                .parse()
+                .unwrap(),
+        )?;
+
+        Ok(onion_service)
     }
 
     pub fn dial(&mut self, addr: Multiaddr) -> Result<(), DialError> {
