@@ -4,8 +4,10 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use libp2p::gossipsub::IdentTopic;
-use libp2p::PeerId;
+use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
 use log::debug;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use trithemiuslib::{
@@ -177,46 +179,37 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
-    fn parse_u16<'a>(
-        command_args: &mut VecDeque<&'a str>,
-    ) -> Result<Option<u16>, std::num::ParseIntError> {
-        command_args
-            .pop_front()
-            .and_then(|s| Some(s.parse::<u16>()))
-            .transpose()
+    fn parse_u16<'a>(value: Option<&'a str>) -> Result<Option<u16>, std::num::ParseIntError> {
+        value.and_then(|s| Some(s.parse::<u16>())).transpose()
     }
 
-    async fn create_transient_onion_service(&mut self, virt_port: u16, target_port: u16) {
-        debug!("Calling TorControlConnection::connect");
-        match TorControlConnection::connect("127.0.0.1:9051").await {
-            Ok(mut connection) => {
-                if let Err(error) = connection.authenticate(TorAuthentication::Null).await {
-                    self.log_error(&format!("Error authenticating to Tor: {}", error));
-                    return;
-                }
-                debug!("Calling create_transient_onion_service");
-                match connection
-                    .create_transient_onion_service(virt_port, target_port)
-                    .await
-                {
-                    Ok(onion_service) => {
-                        debug!("Created onion service {:?}", onion_service);
-                        self.log_info(&format!(
-                            "Created onion service {}.onion:{}",
-                            onion_service.service_id, onion_service.virt_port
-                        ));
+    fn parse_network_address<'a>(
+        value: Option<&'a str>,
+    ) -> Result<Option<Multiaddr>, Box<dyn std::error::Error>> {
+        match value {
+            None => Ok(None),
+            Some(addr) => {
+                if addr.starts_with("/") {
+                    Ok(Some(Multiaddr::from_str(addr)?))
+                } else {
+                    let mut multiaddr = Multiaddr::empty();
+                    let parts = addr.split(":").collect::<Vec<&str>>();
+                    multiaddr.push(if let Ok(ipv4) = Ipv4Addr::from_str(parts[0]) {
+                        Protocol::Ip4(ipv4)
+                    } else if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
+                        Protocol::Ip6(ipv6)
+                    } else {
+                        Protocol::Dns(parts[0].into())
+                    });
+                    match Self::parse_u16(Some(parts[1])) {
+                        Ok(Some(port)) => {
+                            multiaddr.push(Protocol::Tcp(port));
+                            Ok(Some(multiaddr))
+                        }
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(error)?,
                     }
-                    Err(error) => {
-                        debug!("Error connecting to Tor process: {}", error);
-                        self.log_error(&format!("Error connecting to Tor process: {}", error));
-                    }
                 }
-            }
-            Err(error) => {
-                self.log_error(&format!(
-                    "Got error on TorControlConnection::connect: {}",
-                    error
-                ));
             }
         }
     }
@@ -249,43 +242,86 @@ impl UI {
                         Ok(None)
                     }
                 },
+                "listen" => {
+                    debug!("Got listen command");
+                    match Self::parse_network_address(command_args.pop_front()) {
+                        Ok(Some(network_addr)) => {
+                            engine.listen(network_addr).unwrap();
+                        }
+                        Ok(None) => {
+                            self.log_error("Network address {} not parsable");
+                        }
+                        Err(error) => {
+                            self.log_error(&format!("Error parsing network address: {}", error));
+                        }
+                    }
+                    Ok(None)
+                }
+                "connect" => {
+                    debug!("Got connect command");
+                    match Self::parse_network_address(command_args.pop_front()) {
+                        Ok(Some(network_addr)) => {
+                            engine.dial(network_addr).unwrap();
+                        }
+                        Ok(None) => {
+                            self.log_error("Network address {} not parsable");
+                        }
+                        Err(error) => {
+                            self.log_error(&format!("Error parsing network address: {}", error));
+                        }
+                    }
+                    Ok(None)
+                }
                 "create-onion-service" => {
                     debug!("Got create-onion-service command");
-                    match Self::parse_u16(&mut command_args) {
-                        Ok(Some(virt_port)) => match Self::parse_u16(&mut command_args) {
+                    let (virt_port, target_port) = match Self::parse_u16(command_args.pop_front()) {
+                        Ok(Some(virt_port)) => match Self::parse_u16(command_args.pop_front()) {
                             Ok(Some(target_port)) => {
                                 debug!(
                                     "Got virt_port = {}, target_port = {}",
                                     virt_port, target_port
                                 );
-                                self.create_transient_onion_service(virt_port, target_port)
-                                    .await;
-                                Ok(None)
+                                (virt_port, target_port)
                             }
                             Ok(None) => {
                                 debug!(
                                     "Got virt_port = {}, target_port = {}",
                                     virt_port, virt_port
                                 );
-                                self.create_transient_onion_service(virt_port, virt_port)
-                                    .await;
-                                Ok(None)
+                                (virt_port, virt_port)
                             }
                             Err(error) => {
                                 debug!("Got error parsing virt_port: {}", error);
                                 self.log_error(&format!("Error parsing target_port: {}", error));
-                                Ok(None)
+                                return Ok(None);
                             }
                         },
                         Ok(None) => {
                             self.log_error("Must specify a virtual port for create-onion-service");
-                            Ok(None)
+                            return Ok(None);
                         }
                         Err(error) => {
                             self.log_error(&format!("Error parsing virtual port: {}", error));
-                            Ok(None)
+                            return Ok(None);
+                        }
+                    };
+
+                    match engine
+                        .create_transient_onion_service(virt_port, target_port)
+                        .await
+                    {
+                        Ok(onion_service) => {
+                            self.log_info(&format!(
+                                "Created onion service {}.onion:{}",
+                                onion_service.service_id, onion_service.virt_port
+                            ));
+                        }
+                        Err(error) => {
+                            self.log_error(&format!("Error creating onion service: {}", error));
                         }
                     }
+
+                    Ok(None)
                 }
                 "unsubscribe" => match command_args.pop_front() {
                     Some(topic_name) => {
@@ -324,7 +360,7 @@ impl UI {
         engine: &mut Engine,
         event: Event,
     ) -> Result<Option<InputEvent>, std::io::Error> {
-        debug!("Got input event {:?}", event);
+        // debug!("Got input event {:?}", event);
         match event {
             Event::Mouse(_) => Ok(None),
             Event::Resize(_, _) => Ok(None),
@@ -503,7 +539,7 @@ impl UI {
     }
 
     pub fn draw(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
-        debug!("UI::draw called");
+        // debug!("UI::draw called");
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(

@@ -1,7 +1,12 @@
 pub mod engine_event;
 pub mod tor;
 
-use crate::tor::transport::TorTransportWrapper;
+use crate::tor::{
+    auth::TorAuthentication,
+    control_connection::{OnionService, TorControlConnection},
+    error::TorError,
+    transport::TorTransportWrapper,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use engine_event::EngineEvent;
@@ -115,6 +120,7 @@ pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
 
 pub struct Engine {
     swarm: Swarm<EngineBehaviour>,
+    tor_connection: Option<TorControlConnection>,
 }
 
 impl Engine {
@@ -154,7 +160,34 @@ impl Engine {
             }))
             .build();
 
-        Ok(Engine { swarm })
+        Ok(Engine {
+            swarm,
+            tor_connection: None,
+        })
+    }
+
+    async fn get_tor_connection(&mut self) -> Result<&mut TorControlConnection, TorError> {
+        if let None = self.tor_connection {
+            self.tor_connection = Some(TorControlConnection::connect("127.0.0.1:9051").await?);
+        }
+
+        Ok(self.tor_connection.as_mut().unwrap())
+    }
+
+    pub async fn create_transient_onion_service(
+        &mut self,
+        virt_port: u16,
+        target_port: u16,
+    ) -> Result<OnionService, TorError> {
+        self.get_tor_connection()
+            .await?
+            .authenticate(TorAuthentication::Null)
+            .await?;
+
+        self.get_tor_connection()
+            .await?
+            .create_transient_onion_service(virt_port, target_port)
+            .await
     }
 
     pub fn dial(&mut self, addr: Multiaddr) -> Result<(), DialError> {

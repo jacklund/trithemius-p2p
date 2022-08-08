@@ -11,7 +11,7 @@ use libp2p::{
     PeerId,
 };
 use log::{debug, LevelFilter};
-// use simple_logging;
+use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
@@ -75,7 +75,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
         event: Result<Self::Event, std::io::Error>,
     ) -> Result<Option<InputEvent>, std::io::Error> {
         let event = self.ui.handle_input_event(engine, event?).await?;
-        debug!("handle_input, got event {:?}", event);
+        // debug!("handle_input, got event {:?}", event);
 
         Ok(event)
     }
@@ -85,7 +85,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
         engine: &mut Engine,
         event: EngineEvent,
     ) -> Result<Option<EngineEvent>, std::io::Error> {
-        debug!("Event: {:?}", event);
+        // debug!("Event: {:?}", event);
         Ok(match event {
             EngineEvent::Discovered(list) => {
                 for peer in list {
@@ -187,7 +187,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     }
 
     async fn update(&mut self) -> Result<(), std::io::Error> {
-        debug!("Called handler::update()");
+        // debug!("Called handler::update()");
         self.renderer.render(&self.ui)
     }
 }
@@ -220,13 +220,6 @@ async fn main() -> Result<(), std::io::Error> {
     handler
         .ui
         .log_info(&format!("Local peer id: {:?}", peer_id));
-
-    // Listen on all interfaces and whatever port the OS assigns
-    engine
-        .listen("/ip4/0.0.0.0/tcp/0".parse().unwrap())
-        .unwrap();
-
-    engine.subscribe("chat").unwrap();
 
     engine.run(TermInputStream::new(), handler).await
 }
