@@ -10,11 +10,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use trithemiuslib::{
-    engine_event::EngineEvent,
-    tor::{auth::TorAuthentication, control_connection::TorControlConnection},
-    ChatMessage, Engine, InputEvent,
-};
+use trithemiuslib::{ChatMessage, Engine, InputEvent};
 
 use tui::backend::CrosstermBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -179,21 +175,21 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
-    fn parse_u16<'a>(value: Option<&'a str>) -> Result<Option<u16>, std::num::ParseIntError> {
-        value.and_then(|s| Some(s.parse::<u16>())).transpose()
+    fn parse_u16(value: Option<&str>) -> Result<Option<u16>, std::num::ParseIntError> {
+        value.map(|s| s.parse::<u16>()).transpose()
     }
 
-    fn parse_network_address<'a>(
-        value: Option<&'a str>,
+    fn parse_network_address(
+        value: Option<&str>,
     ) -> Result<Option<Multiaddr>, Box<dyn std::error::Error>> {
         match value {
             None => Ok(None),
             Some(addr) => {
-                if addr.starts_with("/") {
+                if addr.starts_with('/') {
                     Ok(Some(Multiaddr::from_str(addr)?))
                 } else {
                     let mut multiaddr = Multiaddr::empty();
-                    let parts = addr.split(":").collect::<Vec<&str>>();
+                    let parts = addr.split(':').collect::<Vec<&str>>();
                     multiaddr.push(if let Ok(ipv4) = Ipv4Addr::from_str(parts[0]) {
                         Protocol::Ip4(ipv4)
                     } else if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
@@ -522,7 +518,7 @@ impl UI {
         self.messages.push(Message::LogMessage {
             date: Local::now(),
             level,
-            message: message,
+            message,
         });
     }
 

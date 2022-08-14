@@ -84,7 +84,7 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
             GenTcpConfig::default().nodelay(true),
         ))
         .unwrap(), // TODO: Have this return a result so we don't have to unwrap here
-        ("127.0.0.1", 9050 as u16) // TODO: Configure the TOR SOCKS5 proxy address
+        ("127.0.0.1", 9050) // TODO: Configure the TOR SOCKS5 proxy address
             .to_socket_addrs()
             .unwrap()
             .next()
@@ -167,7 +167,7 @@ impl Engine {
     }
 
     async fn get_tor_connection(&mut self) -> Result<&mut TorControlConnection, TorError> {
-        if let None = self.tor_connection {
+        if self.tor_connection.is_none() {
             self.tor_connection = Some(TorControlConnection::connect("127.0.0.1:9051").await?);
         }
 
@@ -254,7 +254,7 @@ impl Engine {
                             match self.publish(topic, message) {
                                 Ok(_message_id) => (),
                                 Err(error) => {
-                                    handler.handle_error(&format!("Error publishing message: {}", error));
+                                    handler.handle_error(&format!("Error publishing message: {}", error)).await;
                                 }
                             }
                         },

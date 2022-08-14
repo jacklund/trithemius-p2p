@@ -1,6 +1,5 @@
 use crate::tor::control_connection::TorControlConnection;
 use crate::tor::error::TorError;
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
 pub enum TorAuthentication {
     Null,

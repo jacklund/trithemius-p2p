@@ -11,7 +11,7 @@ use libp2p::{
     PeerId,
 };
 use log::{debug, LevelFilter};
-use simple_logging;
+// use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
@@ -55,7 +55,7 @@ struct MyHandler {
 }
 
 impl MyHandler {
-    fn new(my_identity: PeerId, topic: IdentTopic) -> Self {
+    fn new(my_identity: PeerId, _topic: IdentTopic) -> Self {
         Self {
             my_identity,
             ui: UI::new(my_identity),
@@ -82,17 +82,11 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 
     async fn handle_event(
         &mut self,
-        engine: &mut Engine,
+        _engine: &mut Engine,
         event: EngineEvent,
     ) -> Result<Option<EngineEvent>, std::io::Error> {
         // debug!("Event: {:?}", event);
         Ok(match event {
-            EngineEvent::Discovered(list) => {
-                for peer in list {
-                    debug!("Discovered peer {}", peer.peer_id);
-                }
-                None
-            }
             EngineEvent::Expired(list) => {
                 for peer in list {
                     debug!("Peer {} left", peer.peer_id);
@@ -101,10 +95,10 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
             }
             EngineEvent::Message {
                 source,
-                propagation_source,
-                topic,
-                message_id,
-                sequence_number,
+                propagation_source: _,
+                topic: _,
+                message_id: _,
+                sequence_number: _,
                 message,
             } => {
                 self.ui
@@ -196,7 +190,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     // env_logger::init();
-    // simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
+    simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
 
     // Create a random PeerId
     let id_keys = identity::Keypair::generate_ed25519();
@@ -204,6 +198,7 @@ async fn main() -> Result<(), std::io::Error> {
     debug!("Local peer id: {:?}", peer_id);
 
     let transport = create_transport(&id_keys);
+    debug!("Transport: {:?}", transport);
 
     // Create a Swarm to manage peers and events.
     let mut engine = Engine::new(id_keys, transport, peer_id)?;

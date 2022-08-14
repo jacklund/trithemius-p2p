@@ -57,8 +57,7 @@ impl<T> TorTransportWrapper<T> {
     }
 }
 
-fn to_onion3_domain<'a>(addr: Multiaddr) -> Option<(String, u16)> {
-    let mut addr = addr.clone();
+fn to_onion3_domain(mut addr: Multiaddr) -> Option<(String, u16)> {
     if let Some(Protocol::Onion3(address)) = addr.pop() {
         let onion_address = format!(
             "{}.onion",
@@ -94,22 +93,21 @@ where
     }
 
     fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let dest_addr = addr.clone();
-        let proxy_addr = self.proxy_addr.clone();
+        let proxy_addr = self.proxy_addr;
         let inner = self.inner.clone();
         Ok(async move {
-            if let Some((host, port)) = to_onion3_domain(dest_addr.clone()) {
+            if let Some((host, port)) = to_onion3_domain(addr.clone()) {
                 match Socks5Stream::connect(proxy_addr, (host, port)).await {
                     Ok(connection) => Ok(TcpStream(connection.into_inner())),
                     Err(error) => Err(TorTransportError::SocksError(error)),
                 }
             } else {
-                let dial = inner.lock().dial(dest_addr);
+                let dial = inner.lock().dial(addr);
                 match dial {
-                    Ok(future) => future.await.map_err(|e| TorTransportError::Transport(e)),
+                    Ok(future) => future.await.map_err(TorTransportError::Transport),
                     Err(error) => match error {
-                        TransportError::MultiaddrNotSupported(dest_addr) => {
-                            Err(TorTransportError::MultiaddrNotSupported(dest_addr))
+                        TransportError::MultiaddrNotSupported(addr) => {
+                            Err(TorTransportError::MultiaddrNotSupported(addr))
                         }
                         TransportError::Other(error) => Err(TorTransportError::Transport(error)),
                     },
@@ -144,7 +142,7 @@ where
     }
 
     fn poll(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
         let mut inner = self.inner.lock();

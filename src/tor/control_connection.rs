@@ -51,18 +51,18 @@ async fn parse_control_response<S: StreamExt<Item = Result<String, LinesCodecErr
     reader: &mut S,
 ) -> Result<ControlResponse, TorError> {
     lazy_static! {
-        static ref AsyncRegex: Regex = Regex::new(
+        static ref ASYNC_REGEX: Regex = Regex::new(
             r"^(?P<code>6\d{2})(?P<type>[\- +])(?P<keyword>[^ ]*) (?P<response>.*)\r?\n?$"
         )
         .unwrap();
-        static ref SyncRegex: Regex =
+        static ref SYNC_REGEX: Regex =
             Regex::new(r"^(?P<code>\d{3})(?P<type>[\- +])(?P<response>.*)\r?\n?$").unwrap();
     }
 
     let line = read_line(reader).await?;
-    match AsyncRegex.captures(&line) {
+    match ASYNC_REGEX.captures(&line) {
         Some(captures) => Ok(captures.into()),
-        None => match SyncRegex.captures(&line) {
+        None => match SYNC_REGEX.captures(&line) {
             Some(captures) => Ok(captures.into()),
             None => Err(TorError::ProtocolError(format!(
                 "Unknown response: {}",
@@ -138,7 +138,10 @@ pub struct TorControlConnection {
 
 impl TorControlConnection {
     pub async fn connect<A: ToSocketAddrs>(addrs: A) -> Result<Self, TorError> {
-        let stream = TcpStream::connect(addrs).await?;
+        Self::with_stream(TcpStream::connect(addrs).await?)
+    }
+
+    pub fn with_stream(stream: TcpStream) -> Result<Self, TorError> {
         let (reader, writer) = tokio::io::split(stream);
         Ok(Self {
             reader: FramedRead::new(reader, LinesCodec::new()),
@@ -166,7 +169,7 @@ impl TorControlConnection {
         arguments: Option<String>,
     ) -> Result<ControlResponse, TorError> {
         match arguments {
-            None => self.write(&format!("{}", command)).await?,
+            None => self.write(command).await?,
             Some(arguments) => self.write(&format!("{} {}", command, arguments)).await?,
         };
         match self.read_response().await {
@@ -321,14 +324,14 @@ mod tests {
         let (client, server) = create_mock().await?;
         let mut server = Framed::new(server, LinesCodec::new());
         server.send("250 OK").await?;
-        let mut tor = TorControlConnection::connect(client);
+        let mut tor = TorControlConnection::with_stream(client)?;
         let result = tor.authenticate(TorAuthentication::Null).await;
         assert!(result.is_ok());
 
         let (client, server) = create_mock().await?;
         let mut server = Framed::new(server, LinesCodec::new());
         server.send("551 Oops").await?;
-        let mut tor = TorControlConnection::connect(client);
+        let mut tor = TorControlConnection::with_stream(client)?;
         let result = tor.authenticate(TorAuthentication::Null).await;
         assert!(result.is_err());
         assert_eq!(
