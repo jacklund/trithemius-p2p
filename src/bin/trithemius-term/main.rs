@@ -55,7 +55,7 @@ struct MyHandler {
 }
 
 impl MyHandler {
-    fn new(my_identity: PeerId, _topic: IdentTopic) -> Self {
+    fn new(my_identity: PeerId) -> Self {
         Self {
             my_identity,
             ui: UI::new(my_identity),
@@ -73,7 +73,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
         &mut self,
         engine: &mut Engine,
         event: Result<Self::Event, std::io::Error>,
-    ) -> Result<Option<InputEvent>, std::io::Error> {
+    ) -> Result<Option<InputEvent>, Box<dyn std::error::Error>> {
         let event = self.ui.handle_input_event(engine, event?).await?;
         // debug!("handle_input, got event {:?}", event);
 
@@ -101,8 +101,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 sequence_number: _,
                 message,
             } => {
-                self.ui
-                    .add_message(ChatMessage::new(source.unwrap(), message));
+                self.ui.add_message(ChatMessage::new(source, message));
                 None
             }
             EngineEvent::ConnectionEstablished {
@@ -188,7 +187,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 
 /// The `tokio::main` attribute sets up a tokio runtime.
 #[tokio::main]
-async fn main() -> Result<(), std::io::Error> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env_logger::init();
     simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
 
@@ -197,21 +196,13 @@ async fn main() -> Result<(), std::io::Error> {
     let peer_id = PeerId::from(id_keys.public());
     debug!("Local peer id: {:?}", peer_id);
 
-    let transport = create_transport(&id_keys);
+    let transport = create_transport(&id_keys)?;
     debug!("Transport: {:?}", transport);
 
     // Create a Swarm to manage peers and events.
     let mut engine = Engine::new(id_keys, transport, peer_id)?;
 
-    // Reach out to another node if specified
-    if let Some(to_dial) = std::env::args().nth(1) {
-        let addr: Multiaddr = to_dial.parse().unwrap();
-        engine.dial(addr).unwrap();
-        debug!("Dialed {:?}", to_dial);
-    }
-
-    let topic = IdentTopic::new("chat");
-    let mut handler = MyHandler::new(peer_id, topic.clone());
+    let mut handler = MyHandler::new(peer_id);
     handler
         .ui
         .log_info(&format!("Local peer id: {:?}", peer_id));

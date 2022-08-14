@@ -196,7 +196,7 @@ impl From<GossipsubEvent> for EngineEvent {
                 source: message.source,
                 topic: message.topic,
                 sequence_number: message.sequence_number,
-                message: std::str::from_utf8(&message.data).unwrap().to_string(),
+                message: std::str::from_utf8(&message.data).unwrap().to_string(), // TODO: Figure out how not to unwrap this
             },
             GossipsubEvent::Subscribed { peer_id, topic } => {
                 EngineEvent::Subscribed { peer_id, topic }

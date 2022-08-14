@@ -56,12 +56,12 @@ pub enum InputEvent {
 #[derive(Clone)]
 pub struct ChatMessage {
     pub date: DateTime<Local>,
-    pub user: PeerId,
+    pub user: Option<PeerId>,
     pub message: String,
 }
 
 impl ChatMessage {
-    pub fn new(user: PeerId, message: String) -> ChatMessage {
+    pub fn new(user: Option<PeerId>, message: String) -> ChatMessage {
         ChatMessage {
             date: Local::now(),
             user,
@@ -70,7 +70,9 @@ impl ChatMessage {
     }
 }
 
-pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
+pub fn create_transport(
+    id_keys: &identity::Keypair,
+) -> Result<Boxed<(PeerId, StreamMuxerBox)>, Box<dyn std::error::Error>> {
     // Create a keypair for authenticated encryption of the transport.
     let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
         .into_authentic(id_keys)
@@ -79,22 +81,19 @@ pub fn create_transport(id_keys: &identity::Keypair) -> Boxed<(PeerId, StreamMux
     // We wrap the base libp2p tokio TCP transport inside the tokio DNS transport, inside our Tor
     // wrapper. Tor wrapper has to be first, so that an onion address isn't resolved by the DNS
     // layer. We need the DNS layer there in case we get a DNS hostname (unlikely, but possible).
-    TorTransportWrapper::new(
+    Ok(TorTransportWrapper::new(
         TokioDnsConfig::system(TokioTcpTransport::new(
             GenTcpConfig::default().nodelay(true),
-        ))
-        .unwrap(), // TODO: Have this return a result so we don't have to unwrap here
+        ))?,
         ("127.0.0.1", 9050) // TODO: Configure the TOR SOCKS5 proxy address
-            .to_socket_addrs()
-            .unwrap()
+            .to_socket_addrs()?
             .next()
             .unwrap(),
-    )
-    .unwrap()
+    )?
     .upgrade(upgrade::Version::V1)
     .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
     .multiplex(mplex::MplexConfig::new())
-    .boxed()
+    .boxed())
 }
 
 #[async_trait]
@@ -105,7 +104,7 @@ pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
         &mut self,
         engine: &mut Engine,
         line: F::Item,
-    ) -> Result<Option<InputEvent>, std::io::Error>;
+    ) -> Result<Option<InputEvent>, Box<dyn std::error::Error>>;
 
     async fn handle_event(
         &mut self,
@@ -180,11 +179,7 @@ impl Engine {
             .create_transient_onion_service(virt_port, target_port)
             .await?;
 
-        self.listen(
-            format!("/ip4/127.0.0.1/tcp/{}", target_port)
-                .parse()
-                .unwrap(),
-        )?;
+        self.listen(format!("/ip4/127.0.0.1/tcp/{}", target_port).parse()?)?;
 
         Ok(onion_service)
     }
@@ -233,7 +228,7 @@ impl Engine {
         &mut self,
         mut input_stream: F,
         mut handler: H,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             handler.update().await?;
 

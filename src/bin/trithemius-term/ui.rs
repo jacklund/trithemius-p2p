@@ -81,7 +81,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        terminal::enable_raw_mode().unwrap();
+        terminal::enable_raw_mode().expect("Error: unable to put terminal in raw mode");
         let mut out = std::io::stdout();
         out.execute(terminal::EnterAlternateScreen).unwrap();
 
@@ -214,7 +214,7 @@ impl UI {
         &mut self,
         engine: &mut Engine,
         mut command_args: VecDeque<&'a str>,
-    ) -> Result<Option<InputEvent>, std::io::Error> {
+    ) -> Result<Option<InputEvent>, Box<dyn std::error::Error>> {
         let command = command_args.pop_front();
         match command {
             Some(command) => match command.to_ascii_lowercase().as_str() {
@@ -242,7 +242,7 @@ impl UI {
                     debug!("Got listen command");
                     match Self::parse_network_address(command_args.pop_front()) {
                         Ok(Some(network_addr)) => {
-                            engine.listen(network_addr).unwrap();
+                            engine.listen(network_addr)?;
                         }
                         Ok(None) => {
                             self.log_error("Network address {} not parsable");
@@ -257,7 +257,7 @@ impl UI {
                     debug!("Got connect command");
                     match Self::parse_network_address(command_args.pop_front()) {
                         Ok(Some(network_addr)) => {
-                            engine.dial(network_addr).unwrap();
+                            engine.dial(network_addr)?;
                         }
                         Ok(None) => {
                             self.log_error("Network address {} not parsable");
@@ -355,7 +355,7 @@ impl UI {
         &mut self,
         engine: &mut Engine,
         event: Event,
-    ) -> Result<Option<InputEvent>, std::io::Error> {
+    ) -> Result<Option<InputEvent>, Box<dyn std::error::Error>> {
         // debug!("Got input event {:?}", event);
         match event {
             Event::Mouse(_) => Ok(None),
@@ -379,7 +379,7 @@ impl UI {
                             self.handle_command(engine, command.split_whitespace().collect())
                                 .await
                         } else {
-                            let message = ChatMessage::new(self.my_identity, input.clone());
+                            let message = ChatMessage::new(Some(self.my_identity), input.clone());
                             self.add_message(message);
                             Ok(Some(InputEvent::Message {
                                 topic: IdentTopic::new("chat"), // TODO: Change this
@@ -436,8 +436,11 @@ impl UI {
         self.last_user_id += 1;
     }
 
-    pub fn get_user_id(&self, peer_id: &PeerId) -> Option<usize> {
-        self.user_ids.get(peer_id).cloned()
+    pub fn get_user_id(&self, peer_id: &Option<PeerId>) -> Option<usize> {
+        match peer_id {
+            Some(peer_id) => self.user_ids.get(peer_id).cloned(),
+            None => None,
+        }
     }
 
     pub fn input_write(&mut self, character: char) {
@@ -575,7 +578,9 @@ impl UI {
                         None => self.my_user_color,
                     };
                     let date = message.date.format("%H:%M:%S ").to_string();
-                    let long_username = message.user.to_base58();
+                    let long_username = message
+                        .user
+                        .map_or("<unknown>".to_string(), |u| u.to_base58());
                     let short_username = long_username[long_username.len() - 7..].to_string();
                     let mut ui_message = vec![
                         Span::styled(date, Style::default().fg(self.date_color)),
