@@ -115,6 +115,7 @@ impl Drop for Renderer {
 pub struct UI {
     my_identity: PeerId,
     messages: Vec<Message>,
+    subscriptions: Vec<String>,
     scroll_messages_view: usize,
     input: Vec<char>,
     input_cursor: usize,
@@ -132,6 +133,7 @@ impl UI {
         Self {
             my_identity,
             messages: Vec::new(),
+            subscriptions: Vec::new(),
             scroll_messages_view: 0,
             input: Vec::new(),
             input_cursor: 0,
@@ -222,6 +224,7 @@ impl UI {
                     Some(topic_name) => {
                         match engine.subscribe(topic_name) {
                             Ok(true) => {
+                                self.subscriptions.push(topic_name.to_string());
                                 self.log_info(&format!("Subscribed to topic '{}'", topic_name))
                             }
                             Ok(false) => self
@@ -235,6 +238,34 @@ impl UI {
                     }
                     None => {
                         self.log_error("'subscribe' command requires topic name to subscribe to");
+                        Ok(None)
+                    }
+                },
+                "unsubscribe" => match command_args.pop_front() {
+                    Some(topic_name) => {
+                        match engine.unsubscribe(topic_name) {
+                            Ok(true) => {
+                                match self.subscriptions.iter().position(|t| t == topic_name) {
+                                    Some(index) => {
+                                        self.subscriptions.swap_remove(index);
+                                    }
+                                    None => self.log_error("Topic not found in subscriptions"),
+                                };
+                                self.log_info(&format!("Unsubscribed to topic '{}'", topic_name))
+                            }
+                            Ok(false) => self
+                                .log_info(&format!("Never subscribed to topic '{}'", topic_name)),
+                            Err(error) => self.log_error(&format!(
+                                "Error unsubscribing to topic {}: {}",
+                                topic_name, error
+                            )),
+                        };
+                        Ok(None)
+                    }
+                    None => {
+                        self.log_error(
+                            "'unsubscribe' command requires topic name to unsubscribe from",
+                        );
                         Ok(None)
                     }
                 },
@@ -319,28 +350,6 @@ impl UI {
 
                     Ok(None)
                 }
-                "unsubscribe" => match command_args.pop_front() {
-                    Some(topic_name) => {
-                        match engine.unsubscribe(topic_name) {
-                            Ok(true) => {
-                                self.log_info(&format!("Unsubscribed to topic '{}'", topic_name))
-                            }
-                            Ok(false) => self
-                                .log_info(&format!("Never subscribed to topic '{}'", topic_name)),
-                            Err(error) => self.log_error(&format!(
-                                "Error unsubscribing to topic {}: {}",
-                                topic_name, error
-                            )),
-                        };
-                        Ok(None)
-                    }
-                    None => {
-                        self.log_error(
-                            "'unsubscribe' command requires topic name to unsubscribe from",
-                        );
-                        Ok(None)
-                    }
-                },
                 "quit" => Ok(Some(InputEvent::Shutdown)),
                 _ => {
                     self.log_error(&format!("Unknown command '{}'", command));

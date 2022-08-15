@@ -3,14 +3,9 @@ use async_trait::async_trait;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
-use libp2p::{
-    gossipsub::IdentTopic,
-    identity,
-    // `TokioTcpConfig` is available through the `tcp-tokio` feature.
-    Multiaddr,
-    PeerId,
-};
-use log::{debug, LevelFilter};
+use libp2p::{identity, PeerId};
+use log::debug;
+// use log::LevelFilter;
 // use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
@@ -189,7 +184,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env_logger::init();
-    simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
+    // simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
 
     // Create a random PeerId
     let id_keys = identity::Keypair::generate_ed25519();
