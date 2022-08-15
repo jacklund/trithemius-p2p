@@ -553,7 +553,8 @@ impl UI {
             .constraints(
                 [
                     Constraint::Length(1),
-                    Constraint::Min(1),
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(66),
                     Constraint::Length(1),
                     Constraint::Length(1),
                 ]
@@ -563,8 +564,9 @@ impl UI {
 
         self.draw_title_bar(frame, chunks[0]);
         self.draw_messages_panel(frame, chunks[1]);
-        self.draw_status_bar(frame, chunks[2]);
-        self.draw_input_panel(frame, chunks[3]);
+        self.draw_chat_panel(frame, chunks[2]);
+        self.draw_status_bar(frame, chunks[3]);
+        self.draw_input_panel(frame, chunks[4]);
     }
 
     fn draw_title_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
@@ -580,7 +582,46 @@ impl UI {
         let messages = self
             .messages
             .iter()
-            .map(|message| match message {
+            .filter_map(|message| match message {
+                Message::LogMessage {
+                    date,
+                    level,
+                    message,
+                } => {
+                    let date = date.format("%H:%M:%S ").to_string();
+                    let color = match level {
+                        Level::Info => Color::Gray,
+                        Level::Warning => Color::Rgb(255, 127, 0),
+                        Level::Error => Color::Red,
+                    };
+                    let ui_message = vec![
+                        Span::styled(date, Style::default().fg(self.date_color)),
+                        Span::styled(message, Style::default().fg(color)),
+                    ];
+                    Some(Spans::from(ui_message))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let messages_panel = Paragraph::new(messages)
+            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                "System Messages",
+                Style::default().add_modifier(Modifier::BOLD),
+            )))
+            .style(Style::default().fg(self.chat_panel_color))
+            .alignment(Alignment::Left)
+            .scroll((self.scroll_messages_view() as u16, 0))
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(messages_panel, chunk);
+    }
+
+    fn draw_chat_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
+        let messages = self
+            .messages
+            .iter()
+            .filter_map(|message| match message {
                 Message::ChatMessage(message) => {
                     let color = match self.get_user_id(&message.user) {
                         Some(id) => self.message_colors[id % self.message_colors.len()],
@@ -597,31 +638,15 @@ impl UI {
                         Span::styled(": ", Style::default().fg(color)),
                     ];
                     ui_message.extend(Self::parse_content(&message.message));
-                    Spans::from(ui_message)
+                    Some(Spans::from(ui_message))
                 }
-                Message::LogMessage {
-                    date,
-                    level,
-                    message,
-                } => {
-                    let date = date.format("%H:%M:%S ").to_string();
-                    let color = match level {
-                        Level::Info => Color::Gray,
-                        Level::Warning => Color::Rgb(255, 127, 0),
-                        Level::Error => Color::Red,
-                    };
-                    let ui_message = vec![
-                        Span::styled(date, Style::default().fg(self.date_color)),
-                        Span::styled(message, Style::default().fg(color)),
-                    ];
-                    Spans::from(ui_message)
-                }
+                _ => None,
             })
             .collect::<Vec<_>>();
 
-        let messages_panel = Paragraph::new(messages)
+        let chat_panel = Paragraph::new(messages)
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                "LAN Room",
+                "Chat Messages",
                 Style::default().add_modifier(Modifier::BOLD),
             )))
             .style(Style::default().fg(self.chat_panel_color))
@@ -629,11 +654,11 @@ impl UI {
             .scroll((self.scroll_messages_view() as u16, 0))
             .wrap(Wrap { trim: false });
 
-        frame.render_widget(messages_panel, chunk);
+        frame.render_widget(chat_panel, chunk);
     }
 
     fn draw_status_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
-        let status_bar = Paragraph::new("something")
+        let status_bar = Paragraph::new("Input")
             .block(Block::default().borders(Borders::NONE))
             .style(Style::default().bg(Color::Blue))
             .alignment(Alignment::Left);
