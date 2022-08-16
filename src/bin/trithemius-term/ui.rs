@@ -245,6 +245,17 @@ impl UI {
         self.current_topic_index = Some(self.subscriptions.len() - 1);
     }
 
+    fn get_subscription_index(&self, topic_name: &str) -> Option<usize> {
+        self.subscriptions.iter().position(|t| t.name == topic_name)
+    }
+
+    fn get_subscription_mut(&mut self, topic_name: &str) -> Option<&mut Subscription> {
+        match self.get_subscription_index(topic_name) {
+            Some(index) => self.subscriptions.get_mut(index),
+            None => None,
+        }
+    }
+
     async fn handle_command<'a>(
         &mut self,
         engine: &mut Engine,
@@ -278,7 +289,7 @@ impl UI {
                     Some(topic_name) => {
                         match engine.unsubscribe(topic_name) {
                             Ok(true) => {
-                                match self.subscriptions.iter().position(|t| t.name == topic_name) {
+                                match self.get_subscription_index(topic_name) {
                                     Some(index) => {
                                         // TODO: Maybe just remove from list rather than deleting?
                                         self.subscriptions.swap_remove(index);
@@ -597,11 +608,10 @@ impl UI {
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
-        let subscription = self
-            .subscriptions
-            .get_mut(self.current_topic_index.unwrap())
-            .unwrap();
-        subscription.add_message(message);
+        match self.get_subscription_mut(&message.topic) {
+            Some(subscription) => subscription.add_message(message),
+            None => (),
+        }
     }
 
     fn log_message(&mut self, level: Level, message: String) {
