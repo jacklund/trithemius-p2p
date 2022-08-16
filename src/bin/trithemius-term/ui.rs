@@ -293,6 +293,24 @@ impl UI {
                                     Some(index) => {
                                         // TODO: Maybe just remove from list rather than deleting?
                                         self.subscriptions.swap_remove(index);
+                                        match self.current_topic_index {
+                                            Some(current) => {
+                                                if current > index {
+                                                    self.current_topic_index = Some(current - 1);
+                                                }
+                                                if current == index {
+                                                    if current > 0 {
+                                                        self.current_topic_index =
+                                                            Some(current - 1);
+                                                    } else {
+                                                        if self.subscriptions.is_empty() {
+                                                            self.current_topic_index = None;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            None => panic!("This shouldn't happen!"),
+                                        }
                                     }
                                     None => self.log_error("Topic not found in subscriptions"),
                                 };
