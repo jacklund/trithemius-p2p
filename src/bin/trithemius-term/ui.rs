@@ -17,7 +17,7 @@ use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use tui::style::Color;
 use tui::style::{Modifier, Style};
 use tui::text::{Span, Spans};
-use tui::widgets::{Block, Borders, Paragraph, Wrap};
+use tui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
 use tui::Frame;
 use tui::Terminal;
 
@@ -28,6 +28,12 @@ enum Level {
     Info,
     Warning,
     Error,
+}
+
+struct LogMessage {
+    date: DateTime<Local>,
+    level: Level,
+    message: String,
 }
 
 enum Message {
@@ -112,10 +118,30 @@ impl Drop for Renderer {
     }
 }
 
+struct Subscription {
+    name: String,
+    messages: Vec<ChatMessage>,
+}
+
+impl Subscription {
+    pub fn new(topic: &str) -> Self {
+        Self {
+            name: topic.to_string(),
+            messages: Vec::new(),
+        }
+    }
+
+    fn add_message(&mut self, message: ChatMessage) {
+        self.messages.push(message);
+    }
+}
+
 pub struct UI {
     my_identity: PeerId,
-    messages: Vec<Message>,
-    subscriptions: Vec<String>,
+    messages: Vec<ChatMessage>,
+    log_messages: Vec<LogMessage>,
+    subscriptions: Vec<Subscription>,
+    current_topic_index: Option<usize>,
     scroll_messages_view: usize,
     input: Vec<char>,
     input_cursor: usize,
@@ -133,7 +159,9 @@ impl UI {
         Self {
             my_identity,
             messages: Vec::new(),
+            log_messages: Vec::new(),
             subscriptions: Vec::new(),
+            current_topic_index: None,
             scroll_messages_view: 0,
             input: Vec::new(),
             input_cursor: 0,
@@ -212,6 +240,11 @@ impl UI {
         }
     }
 
+    fn add_subscription(&mut self, subscription: Subscription) {
+        self.subscriptions.push(subscription);
+        self.current_topic_index = Some(self.subscriptions.len() - 1);
+    }
+
     async fn handle_command<'a>(
         &mut self,
         engine: &mut Engine,
@@ -224,7 +257,7 @@ impl UI {
                     Some(topic_name) => {
                         match engine.subscribe(topic_name) {
                             Ok(true) => {
-                                self.subscriptions.push(topic_name.to_string());
+                                self.add_subscription(Subscription::new(topic_name));
                                 self.log_info(&format!("Subscribed to topic '{}'", topic_name))
                             }
                             Ok(false) => self
@@ -245,8 +278,9 @@ impl UI {
                     Some(topic_name) => {
                         match engine.unsubscribe(topic_name) {
                             Ok(true) => {
-                                match self.subscriptions.iter().position(|t| t == topic_name) {
+                                match self.subscriptions.iter().position(|t| t.name == topic_name) {
                                     Some(index) => {
+                                        // TODO: Maybe just remove from list rather than deleting?
                                         self.subscriptions.swap_remove(index);
                                     }
                                     None => self.log_error("Topic not found in subscriptions"),
@@ -388,12 +422,26 @@ impl UI {
                             self.handle_command(engine, command.split_whitespace().collect())
                                 .await
                         } else {
-                            let message = ChatMessage::new(Some(self.my_identity), input.clone());
-                            self.add_message(message);
-                            Ok(Some(InputEvent::Message {
-                                topic: IdentTopic::new("chat"), // TODO: Change this
-                                message: input.into_bytes(),
-                            }))
+                            match self.current_topic_index {
+                                Some(index) => {
+                                    let topic = self.subscriptions.get(index).unwrap().name.clone();
+                                    let message = ChatMessage::new(
+                                        Some(self.my_identity),
+                                        topic,
+                                        input.clone(),
+                                    );
+                                    let subscription = self.subscriptions.get_mut(index).unwrap();
+                                    subscription.add_message(message);
+                                    Ok(Some(InputEvent::Message {
+                                        topic: IdentTopic::new(subscription.name.clone()),
+                                        message: input.into_bytes(),
+                                    }))
+                                }
+                                None => {
+                                    self.log_error("Not currently subscribed to anything");
+                                    Ok(None)
+                                }
+                            }
                         }
                     } else {
                         Ok(None)
@@ -408,11 +456,37 @@ impl UI {
                     Ok(None)
                 }
                 KeyCode::Left => {
-                    self.input_move_cursor(CursorMovement::Left);
+                    if modifiers == KeyModifiers::CONTROL {
+                        match self.current_topic_index {
+                            Some(index) => {
+                                if index == 0 {
+                                    self.current_topic_index = Some(self.subscriptions.len() - 1);
+                                } else {
+                                    self.current_topic_index = Some(index - 1);
+                                }
+                            }
+                            None => (),
+                        }
+                    } else {
+                        self.input_move_cursor(CursorMovement::Left);
+                    }
                     Ok(None)
                 }
                 KeyCode::Right => {
-                    self.input_move_cursor(CursorMovement::Right);
+                    if modifiers == KeyModifiers::CONTROL {
+                        match self.current_topic_index {
+                            Some(index) => {
+                                if index == self.subscriptions.len() - 1 {
+                                    self.current_topic_index = Some(0);
+                                } else {
+                                    self.current_topic_index = Some(index + 1);
+                                }
+                            }
+                            None => (),
+                        }
+                    } else {
+                        self.input_move_cursor(CursorMovement::Right);
+                    }
                     Ok(None)
                 }
                 KeyCode::Home => {
@@ -523,11 +597,15 @@ impl UI {
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
-        self.messages.push(Message::ChatMessage(message));
+        let subscription = self
+            .subscriptions
+            .get_mut(self.current_topic_index.unwrap())
+            .unwrap();
+        subscription.add_message(message);
     }
 
     fn log_message(&mut self, level: Level, message: String) {
-        self.messages.push(Message::LogMessage {
+        self.log_messages.push(LogMessage {
             date: Local::now(),
             level,
             message,
@@ -548,25 +626,50 @@ impl UI {
 
     pub fn draw(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         // debug!("UI::draw called");
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Length(1),
-                    Constraint::Percentage(30),
-                    Constraint::Percentage(66),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ]
-                .as_ref(),
-            )
-            .split(chunk);
+        match self.current_topic_index {
+            Some(_) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(
+                        [
+                            Constraint::Length(1),
+                            Constraint::Length(20),
+                            Constraint::Length(3),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                            Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(chunk);
 
-        self.draw_title_bar(frame, chunks[0]);
-        self.draw_messages_panel(frame, chunks[1]);
-        self.draw_chat_panel(frame, chunks[2]);
-        self.draw_status_bar(frame, chunks[3]);
-        self.draw_input_panel(frame, chunks[4]);
+                self.draw_title_bar(frame, chunks[0]);
+                self.draw_system_messages_panel(frame, chunks[1]);
+                self.draw_chat_tabs(frame, chunks[2]);
+                self.draw_chat_panel(frame, chunks[3]);
+                self.draw_status_bar(frame, chunks[4]);
+                self.draw_input_panel(frame, chunks[5]);
+            }
+            None => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(
+                        [
+                            Constraint::Length(1),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                            Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(chunk);
+
+                self.draw_title_bar(frame, chunks[0]);
+                self.draw_system_messages_panel(frame, chunks[1]);
+                self.draw_status_bar(frame, chunks[2]);
+                self.draw_input_panel(frame, chunks[3]);
+            }
+        }
     }
 
     fn draw_title_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
@@ -578,29 +681,26 @@ impl UI {
         frame.render_widget(title_bar, chunk);
     }
 
-    fn draw_messages_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
+    fn draw_system_messages_panel(
+        &self,
+        frame: &mut Frame<CrosstermBackend<impl Write>>,
+        chunk: Rect,
+    ) {
         let messages = self
-            .messages
+            .log_messages
             .iter()
-            .filter_map(|message| match message {
-                Message::LogMessage {
-                    date,
-                    level,
-                    message,
-                } => {
-                    let date = date.format("%H:%M:%S ").to_string();
-                    let color = match level {
-                        Level::Info => Color::Gray,
-                        Level::Warning => Color::Rgb(255, 127, 0),
-                        Level::Error => Color::Red,
-                    };
-                    let ui_message = vec![
-                        Span::styled(date, Style::default().fg(self.date_color)),
-                        Span::styled(message, Style::default().fg(color)),
-                    ];
-                    Some(Spans::from(ui_message))
-                }
-                _ => None,
+            .map(|message| {
+                let date = message.date.format("%H:%M:%S ").to_string();
+                let color = match message.level {
+                    Level::Info => Color::Gray,
+                    Level::Warning => Color::Rgb(255, 127, 0),
+                    Level::Error => Color::Red,
+                };
+                let ui_message = vec![
+                    Span::styled(date, Style::default().fg(self.date_color)),
+                    Span::styled(message.message.clone(), Style::default().fg(color)),
+                ];
+                Spans::from(ui_message)
             })
             .collect::<Vec<_>>();
 
@@ -617,44 +717,63 @@ impl UI {
         frame.render_widget(messages_panel, chunk);
     }
 
-    fn draw_chat_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
-        let messages = self
-            .messages
+    fn draw_chat_tabs(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
+        let names = self
+            .subscriptions
             .iter()
-            .filter_map(|message| match message {
-                Message::ChatMessage(message) => {
-                    let color = match self.get_user_id(&message.user) {
-                        Some(id) => self.message_colors[id % self.message_colors.len()],
-                        None => self.my_user_color,
-                    };
-                    let date = message.date.format("%H:%M:%S ").to_string();
-                    let long_username = message
-                        .user
-                        .map_or("<unknown>".to_string(), |u| u.to_base58());
-                    let short_username = long_username[long_username.len() - 7..].to_string();
-                    let mut ui_message = vec![
-                        Span::styled(date, Style::default().fg(self.date_color)),
-                        Span::styled(short_username, Style::default().fg(color)),
-                        Span::styled(": ", Style::default().fg(color)),
-                    ];
-                    ui_message.extend(Self::parse_content(&message.message));
-                    Some(Spans::from(ui_message))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            .map(|s| Spans::from(s.name.clone()))
+            .collect();
 
-        let chat_panel = Paragraph::new(messages)
-            .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                "Chat Messages",
-                Style::default().add_modifier(Modifier::BOLD),
-            )))
-            .style(Style::default().fg(self.chat_panel_color))
-            .alignment(Alignment::Left)
-            .scroll((self.scroll_messages_view() as u16, 0))
-            .wrap(Wrap { trim: false });
+        let tabs = Tabs::new(names)
+            .block(Block::default().title("Chats").borders(Borders::ALL))
+            .style(Style::default().fg(Color::White))
+            .highlight_style(Style::default().fg(Color::Yellow))
+            .select(self.current_topic_index.unwrap());
 
-        frame.render_widget(chat_panel, chunk);
+        frame.render_widget(tabs, chunk);
+    }
+
+    fn draw_chat_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
+        match self.current_topic_index {
+            Some(index) => {
+                let subscription = self.subscriptions.get(index).unwrap();
+                let messages = subscription
+                    .messages
+                    .iter()
+                    .map(|message| {
+                        let color = match self.get_user_id(&message.user) {
+                            Some(id) => self.message_colors[id % self.message_colors.len()],
+                            None => self.my_user_color,
+                        };
+                        let date = message.date.format("%H:%M:%S ").to_string();
+                        let long_username = message
+                            .user
+                            .map_or("<unknown>".to_string(), |u| u.to_base58());
+                        let short_username = long_username[long_username.len() - 7..].to_string();
+                        let mut ui_message = vec![
+                            Span::styled(date, Style::default().fg(self.date_color)),
+                            Span::styled(short_username, Style::default().fg(color)),
+                            Span::styled(": ", Style::default().fg(color)),
+                        ];
+                        ui_message.extend(Self::parse_content(&message.message));
+                        Spans::from(ui_message)
+                    })
+                    .collect::<Vec<_>>();
+
+                let chat_panel = Paragraph::new(messages)
+                    .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                        subscription.name.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )))
+                    .style(Style::default().fg(self.chat_panel_color))
+                    .alignment(Alignment::Left)
+                    .scroll((self.scroll_messages_view() as u16, 0))
+                    .wrap(Wrap { trim: false });
+
+                frame.render_widget(chat_panel, chunk);
+            }
+            None => (),
+        }
     }
 
     fn draw_status_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {

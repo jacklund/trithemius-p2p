@@ -53,17 +53,20 @@ pub enum InputEvent {
     Shutdown,
 }
 
+// TODO: Add topic!!!
 #[derive(Clone)]
 pub struct ChatMessage {
     pub date: DateTime<Local>,
+    pub topic: String,
     pub user: Option<PeerId>,
     pub message: String,
 }
 
 impl ChatMessage {
-    pub fn new(user: Option<PeerId>, message: String) -> ChatMessage {
+    pub fn new(user: Option<PeerId>, topic: String, message: String) -> ChatMessage {
         ChatMessage {
             date: Local::now(),
+            topic,
             user,
             message,
         }

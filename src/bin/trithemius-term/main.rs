@@ -91,12 +91,13 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
             EngineEvent::Message {
                 source,
                 propagation_source: _,
-                topic: _,
+                topic,
                 message_id: _,
                 sequence_number: _,
                 message,
             } => {
-                self.ui.add_message(ChatMessage::new(source, message));
+                self.ui
+                    .add_message(ChatMessage::new(source, topic.to_string(), message));
                 None
             }
             EngineEvent::ConnectionEstablished {
