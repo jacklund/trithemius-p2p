@@ -4,7 +4,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use libp2p::gossipsub::IdentTopic;
-use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
+use libp2p::{core::transport::ListenerId, multiaddr::Protocol, Multiaddr, PeerId};
 use log::debug;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -34,15 +34,6 @@ struct LogMessage {
     date: DateTime<Local>,
     level: Level,
     message: String,
-}
-
-enum Message {
-    LogMessage {
-        date: DateTime<Local>,
-        level: Level,
-        message: String,
-    },
-    ChatMessage(ChatMessage),
 }
 
 pub enum CursorMovement {
@@ -205,37 +196,29 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
-    fn parse_u16(value: Option<&str>) -> Result<Option<u16>, std::num::ParseIntError> {
-        value.map(|s| s.parse::<u16>()).transpose()
+    fn parse_port(value: &str) -> Result<u16, std::num::ParseIntError> {
+        value.parse::<u16>()
     }
 
-    fn parse_network_address(
-        value: Option<&str>,
-    ) -> Result<Option<Multiaddr>, Box<dyn std::error::Error>> {
-        match value {
-            None => Ok(None),
-            Some(addr) => {
-                if addr.starts_with('/') {
-                    Ok(Some(Multiaddr::from_str(addr)?))
-                } else {
-                    let mut multiaddr = Multiaddr::empty();
-                    let parts = addr.split(':').collect::<Vec<&str>>();
-                    multiaddr.push(if let Ok(ipv4) = Ipv4Addr::from_str(parts[0]) {
-                        Protocol::Ip4(ipv4)
-                    } else if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
-                        Protocol::Ip6(ipv6)
-                    } else {
-                        Protocol::Dns(parts[0].into())
-                    });
-                    match Self::parse_u16(Some(parts[1])) {
-                        Ok(Some(port)) => {
-                            multiaddr.push(Protocol::Tcp(port));
-                            Ok(Some(multiaddr))
-                        }
-                        Ok(None) => Ok(None),
-                        Err(error) => Err(error)?,
-                    }
+    fn parse_network_address(addr: &str) -> Result<Multiaddr, Box<dyn std::error::Error>> {
+        if addr.starts_with('/') {
+            Ok(Multiaddr::from_str(addr)?)
+        } else {
+            let mut multiaddr = Multiaddr::empty();
+            let parts = addr.split(':').collect::<Vec<&str>>();
+            multiaddr.push(if let Ok(ipv4) = Ipv4Addr::from_str(parts[0]) {
+                Protocol::Ip4(ipv4)
+            } else if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
+                Protocol::Ip6(ipv6)
+            } else {
+                Protocol::Dns(parts[0].into())
+            });
+            match Self::parse_port(parts[1]) {
+                Ok(port) => {
+                    multiaddr.push(Protocol::Tcp(port));
+                    Ok(multiaddr)
                 }
+                Err(error) => Err(error)?,
             }
         }
     }
@@ -256,6 +239,126 @@ impl UI {
         }
     }
 
+    fn subscribe(&mut self, engine: &mut Engine, topic_name: &str) {
+        match engine.subscribe(topic_name) {
+            Ok(true) => {
+                self.add_subscription(Subscription::new(topic_name));
+                self.log_info(&format!("Subscribed to topic '{}'", topic_name))
+            }
+            Ok(false) => self.log_info(&format!("Already subscribed to topic '{}'", topic_name)),
+            Err(error) => self.log_error(&format!(
+                "Error subscribing to topic {}: {}",
+                topic_name, error
+            )),
+        };
+    }
+
+    fn unsubscribe(&mut self, engine: &mut Engine, topic_name: &str) {
+        match engine.unsubscribe(topic_name) {
+            Ok(true) => {
+                match self.get_subscription_index(topic_name) {
+                    Some(index) => {
+                        // TODO: Maybe just remove from list rather than deleting?
+                        self.subscriptions.swap_remove(index);
+                        match self.current_topic_index {
+                            Some(current) => {
+                                if current > index {
+                                    self.current_topic_index = Some(current - 1);
+                                }
+                                if current == index {
+                                    if current > 0 {
+                                        self.current_topic_index = Some(current - 1);
+                                    } else {
+                                        if self.subscriptions.is_empty() {
+                                            self.current_topic_index = None;
+                                        }
+                                    }
+                                }
+                            }
+                            None => panic!("This shouldn't happen!"),
+                        }
+                    }
+                    None => self.log_error("Topic not found in subscriptions"),
+                };
+                self.log_info(&format!("Unsubscribed to topic '{}'", topic_name))
+            }
+            Ok(false) => self.log_info(&format!("Never subscribed to topic '{}'", topic_name)),
+            Err(error) => self.log_error(&format!(
+                "Error unsubscribing to topic {}: {}",
+                topic_name, error
+            )),
+        };
+    }
+
+    fn listen(
+        &mut self,
+        engine: &mut Engine,
+        address: &str,
+    ) -> Result<ListenerId, Box<dyn std::error::Error>> {
+        match Self::parse_network_address(address) {
+            Ok(network_addr) => Ok(engine.listen(network_addr)?),
+            Err(error) => {
+                self.log_error(&format!("Error parsing network address: {}", error));
+                Err(error)
+            }
+        }
+    }
+
+    fn connect(
+        &mut self,
+        engine: &mut Engine,
+        address: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match Self::parse_network_address(address) {
+            Ok(network_addr) => {
+                engine.dial(network_addr)?;
+            }
+            Err(error) => {
+                self.log_error(&format!("Error parsing network address: {}", error));
+            }
+        };
+        Ok(())
+    }
+
+    async fn create_onion_service(
+        &mut self,
+        engine: &mut Engine,
+        virt_port_str: &str,
+        target_port_opt: Option<&str>,
+    ) {
+        let (virt_port, target_port) = match Self::parse_port(virt_port_str) {
+            Ok(virt_port) => match target_port_opt {
+                Some(target_port_str) => match Self::parse_port(target_port_str) {
+                    Ok(target_port) => (virt_port, target_port),
+                    Err(error) => {
+                        self.log_error(&format!("Error parsing target port: {}", error));
+                        return;
+                    }
+                },
+                None => (virt_port, virt_port),
+            },
+            Err(error) => {
+                self.log_error(&format!("Error parsing virtual port: {}", error));
+                return;
+            }
+        };
+
+        match engine
+            .create_transient_onion_service(virt_port, target_port)
+            .await
+        {
+            Ok(onion_service) => {
+                self.log_info(&format!(
+                    "Created onion service {}.onion:{}",
+                    onion_service.service_id, onion_service.virt_port
+                ));
+            }
+            Err(error) => {
+                self.log_error(&format!("Error creating onion service: {}", error));
+            }
+        }
+    }
+
     async fn handle_command<'a>(
         &mut self,
         engine: &mut Engine,
@@ -266,18 +369,7 @@ impl UI {
             Some(command) => match command.to_ascii_lowercase().as_str() {
                 "subscribe" => match command_args.pop_front() {
                     Some(topic_name) => {
-                        match engine.subscribe(topic_name) {
-                            Ok(true) => {
-                                self.add_subscription(Subscription::new(topic_name));
-                                self.log_info(&format!("Subscribed to topic '{}'", topic_name))
-                            }
-                            Ok(false) => self
-                                .log_info(&format!("Already subscribed to topic '{}'", topic_name)),
-                            Err(error) => self.log_error(&format!(
-                                "Error subscribing to topic {}: {}",
-                                topic_name, error
-                            )),
-                        };
+                        self.subscribe(engine, topic_name);
                         Ok(None)
                     }
                     None => {
@@ -287,42 +379,7 @@ impl UI {
                 },
                 "unsubscribe" => match command_args.pop_front() {
                     Some(topic_name) => {
-                        match engine.unsubscribe(topic_name) {
-                            Ok(true) => {
-                                match self.get_subscription_index(topic_name) {
-                                    Some(index) => {
-                                        // TODO: Maybe just remove from list rather than deleting?
-                                        self.subscriptions.swap_remove(index);
-                                        match self.current_topic_index {
-                                            Some(current) => {
-                                                if current > index {
-                                                    self.current_topic_index = Some(current - 1);
-                                                }
-                                                if current == index {
-                                                    if current > 0 {
-                                                        self.current_topic_index =
-                                                            Some(current - 1);
-                                                    } else {
-                                                        if self.subscriptions.is_empty() {
-                                                            self.current_topic_index = None;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            None => panic!("This shouldn't happen!"),
-                                        }
-                                    }
-                                    None => self.log_error("Topic not found in subscriptions"),
-                                };
-                                self.log_info(&format!("Unsubscribed to topic '{}'", topic_name))
-                            }
-                            Ok(false) => self
-                                .log_info(&format!("Never subscribed to topic '{}'", topic_name)),
-                            Err(error) => self.log_error(&format!(
-                                "Error unsubscribing to topic {}: {}",
-                                topic_name, error
-                            )),
-                        };
+                        self.unsubscribe(engine, topic_name);
                         Ok(None)
                     }
                     None => {
@@ -334,82 +391,41 @@ impl UI {
                 },
                 "listen" => {
                     debug!("Got listen command");
-                    match Self::parse_network_address(command_args.pop_front()) {
-                        Ok(Some(network_addr)) => {
-                            engine.listen(network_addr)?;
+                    match command_args.pop_front() {
+                        Some(address) => {
+                            self.listen(engine, address)?;
                         }
-                        Ok(None) => {
-                            self.log_error("Network address {} not parsable");
-                        }
-                        Err(error) => {
-                            self.log_error(&format!("Error parsing network address: {}", error));
+                        None => {
+                            self.log_error(
+                                "'listen' command requires network address to listen on",
+                            );
                         }
                     }
                     Ok(None)
                 }
                 "connect" => {
                     debug!("Got connect command");
-                    match Self::parse_network_address(command_args.pop_front()) {
-                        Ok(Some(network_addr)) => {
-                            engine.dial(network_addr)?;
-                        }
-                        Ok(None) => {
-                            self.log_error("Network address {} not parsable");
-                        }
-                        Err(error) => {
-                            self.log_error(&format!("Error parsing network address: {}", error));
+                    match command_args.pop_front() {
+                        Some(address) => self.connect(engine, address)?,
+                        None => {
+                            self.log_error(
+                                "'connect' command requires network address to connect to",
+                            );
                         }
                     }
                     Ok(None)
                 }
                 "create-onion-service" => {
                     debug!("Got create-onion-service command");
-                    let (virt_port, target_port) = match Self::parse_u16(command_args.pop_front()) {
-                        Ok(Some(virt_port)) => match Self::parse_u16(command_args.pop_front()) {
-                            Ok(Some(target_port)) => {
-                                debug!(
-                                    "Got virt_port = {}, target_port = {}",
-                                    virt_port, target_port
-                                );
-                                (virt_port, target_port)
-                            }
-                            Ok(None) => {
-                                debug!(
-                                    "Got virt_port = {}, target_port = {}",
-                                    virt_port, virt_port
-                                );
-                                (virt_port, virt_port)
-                            }
-                            Err(error) => {
-                                debug!("Got error parsing virt_port: {}", error);
-                                self.log_error(&format!("Error parsing target_port: {}", error));
-                                return Ok(None);
-                            }
-                        },
-                        Ok(None) => {
-                            self.log_error("Must specify a virtual port for create-onion-service");
-                            return Ok(None);
+                    match (command_args.pop_front(), command_args.pop_front()) {
+                        (Some(virt_port_str), target_port_opt) => {
+                            self.create_onion_service(engine, virt_port_str, target_port_opt)
+                                .await;
                         }
-                        Err(error) => {
-                            self.log_error(&format!("Error parsing virtual port: {}", error));
-                            return Ok(None);
+                        _ => {
+                            self.log_error(&format!("'create-onion-service' command requires at least one port argument"));
                         }
                     };
-
-                    match engine
-                        .create_transient_onion_service(virt_port, target_port)
-                        .await
-                    {
-                        Ok(onion_service) => {
-                            self.log_info(&format!(
-                                "Created onion service {}.onion:{}",
-                                onion_service.service_id, onion_service.virt_port
-                            ));
-                        }
-                        Err(error) => {
-                            self.log_error(&format!("Error creating onion service: {}", error));
-                        }
-                    }
 
                     Ok(None)
                 }

@@ -16,8 +16,8 @@ use libp2p::{
     futures::StreamExt,
     gossipsub::{
         error::{PublishError, SubscriptionError},
-        Gossipsub, GossipsubConfigBuilder, GossipsubMessage, IdentTopic, MessageAuthenticity,
-        MessageId, ValidationMode,
+        Gossipsub, GossipsubConfigBuilder, IdentTopic, MessageAuthenticity, MessageId,
+        ValidationMode,
     },
     identity,
     mplex,
@@ -35,8 +35,6 @@ use libp2p::{
 use libp2p_dns::TokioDnsConfig;
 use libp2p_tcp::GenTcpConfig;
 use log::debug;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
