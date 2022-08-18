@@ -1,4 +1,5 @@
 pub mod engine_event;
+pub mod network_addr;
 pub mod subscriptions;
 pub mod tor;
 

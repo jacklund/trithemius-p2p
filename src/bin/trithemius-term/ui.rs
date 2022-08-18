@@ -10,7 +10,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use trithemiuslib::{subscriptions::Subscriptions, ChatMessage, Engine, InputEvent};
+use trithemiuslib::{
+    network_addr::NetworkAddress, subscriptions::Subscriptions, ChatMessage, Engine, InputEvent,
+};
 
 use tui::backend::CrosstermBackend;
 use tui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -176,33 +178,6 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
-    fn parse_port(value: &str) -> Result<u16, std::num::ParseIntError> {
-        value.parse::<u16>()
-    }
-
-    fn parse_network_address(addr: &str) -> Result<Multiaddr, Box<dyn std::error::Error>> {
-        if addr.starts_with('/') {
-            Ok(Multiaddr::from_str(addr)?)
-        } else {
-            let mut multiaddr = Multiaddr::empty();
-            let parts = addr.split(':').collect::<Vec<&str>>();
-            multiaddr.push(if let Ok(ipv4) = Ipv4Addr::from_str(parts[0]) {
-                Protocol::Ip4(ipv4)
-            } else if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
-                Protocol::Ip6(ipv6)
-            } else {
-                Protocol::Dns(parts[0].into())
-            });
-            match Self::parse_port(parts[1]) {
-                Ok(port) => {
-                    multiaddr.push(Protocol::Tcp(port));
-                    Ok(multiaddr)
-                }
-                Err(error) => Err(error)?,
-            }
-        }
-    }
-
     fn subscribe(&mut self, engine: &mut Engine, topic_name: &str) {
         match engine.subscribe(topic_name) {
             Ok(true) => {
@@ -236,11 +211,11 @@ impl UI {
         engine: &mut Engine,
         address: &str,
     ) -> Result<ListenerId, Box<dyn std::error::Error>> {
-        match Self::parse_network_address(address) {
-            Ok(network_addr) => Ok(engine.listen(network_addr)?),
+        match address.parse::<NetworkAddress>() {
+            Ok(network_addr) => Ok(engine.listen(network_addr.into())?),
             Err(error) => {
                 self.log_error(&format!("Error parsing network address: {}", error));
-                Err(error)
+                Err(error)?
             }
         }
     }
@@ -250,12 +225,13 @@ impl UI {
         engine: &mut Engine,
         address: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match Self::parse_network_address(address) {
+        match address.parse::<NetworkAddress>() {
             Ok(network_addr) => {
-                engine.dial(network_addr)?;
+                engine.dial(network_addr.into())?;
             }
             Err(error) => {
                 self.log_error(&format!("Error parsing network address: {}", error));
+                Err(error)?
             }
         };
         Ok(())
@@ -267,9 +243,9 @@ impl UI {
         virt_port_str: &str,
         target_port_opt: Option<&str>,
     ) {
-        let (virt_port, target_port) = match Self::parse_port(virt_port_str) {
+        let (virt_port, target_port) = match virt_port_str.parse::<u16>() {
             Ok(virt_port) => match target_port_opt {
-                Some(target_port_str) => match Self::parse_port(target_port_str) {
+                Some(target_port_str) => match target_port_str.parse::<u16>() {
                     Ok(target_port) => (virt_port, target_port),
                     Err(error) => {
                         self.log_error(&format!("Error parsing target port: {}", error));
