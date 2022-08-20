@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local};
+use circular_queue::CircularQueue;
 use clap::{crate_name, crate_version};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
@@ -199,8 +200,7 @@ impl SubscriptionList {
 
 pub struct UI {
     my_identity: PeerId,
-    messages: Vec<ChatMessage>,
-    log_messages: Vec<LogMessage>,
+    log_messages: CircularQueue<LogMessage>,
     subscriptions: Subscriptions,
     subscription_list: SubscriptionList,
     scroll_messages_view: usize,
@@ -219,8 +219,7 @@ impl UI {
     pub fn new(my_identity: PeerId) -> Self {
         Self {
             my_identity,
-            messages: Vec::new(),
-            log_messages: Vec::new(),
+            log_messages: CircularQueue::with_capacity(200),
             subscriptions: Subscriptions::new(),
             subscription_list: SubscriptionList::new(),
             scroll_messages_view: 0,
