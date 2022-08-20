@@ -53,8 +53,7 @@ pub enum InputEvent {
     Shutdown,
 }
 
-// TODO: Add topic!!!
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub date: DateTime<Local>,
     pub topic: String,
@@ -236,8 +235,8 @@ impl Engine {
             handler.update().await?;
 
             tokio::select! {
-                line = input_stream.select_next_some() => {
-                    match handler.handle_input(self, line).await? {
+                event = input_stream.select_next_some() => {
+                    match handler.handle_input(self, event).await? {
                         Some(InputEvent::Message { topic, message }) => {
                             match self.publish(topic, message) {
                                 Ok(_message_id) => (),

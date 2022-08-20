@@ -5,6 +5,7 @@ use libp2p::{
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+#[derive(Debug, PartialEq)]
 pub struct NetworkAddress {
     addr: Multiaddr,
 }
@@ -16,26 +17,33 @@ impl NetworkAddress {
 
     pub fn as_network_string(&self) -> Result<String, Error> {
         let mut ip_or_dns = "<unknown>".to_string();
-        let mut port = 80;
+        let mut port: Option<u16> = None;
         for protocol in self.addr.iter() {
             match protocol {
                 Protocol::Ip4(ipv4addr) => ip_or_dns = ipv4addr.to_string(),
                 Protocol::Ip6(ipv6addr) => ip_or_dns = ipv6addr.to_string(),
-                Protocol::Tcp(p) => port = p,
-                Protocol::Udp(p) => port = p,
+                Protocol::Tcp(p) => port = Some(p),
+                Protocol::Udp(p) => port = Some(p),
                 Protocol::Dns(dns) => ip_or_dns = dns.to_string(),
                 Protocol::Onion3(addr) => {
                     ip_or_dns = format!(
                         "{}.onion",
                         base32::encode(base32::Alphabet::RFC4648 { padding: false }, addr.hash())
-                    )
+                            .to_lowercase()
+                    );
+                    port = Some(addr.port());
                 }
                 _ => Err(Error::ParsingError(
                     format!("Unable to parse protocol {} as network string", protocol).into(),
                 ))?,
             }
         }
-        Ok(format!("{}:{}", ip_or_dns, port))
+
+        if port.is_none() {
+            Err(Error::ParsingError("No port specified".into()))?;
+        }
+
+        Ok(format!("{}:{}", ip_or_dns, port.unwrap()))
     }
 }
 
@@ -48,6 +56,18 @@ impl From<Multiaddr> for NetworkAddress {
 impl From<NetworkAddress> for Multiaddr {
     fn from(addr: NetworkAddress) -> Self {
         addr.addr
+    }
+}
+
+impl PartialEq<Multiaddr> for NetworkAddress {
+    fn eq(&self, other: &Multiaddr) -> bool {
+        self.addr == *other
+    }
+}
+
+impl PartialEq<NetworkAddress> for Multiaddr {
+    fn eq(&self, other: &NetworkAddress) -> bool {
+        *self == other.addr
     }
 }
 
@@ -91,5 +111,72 @@ impl std::str::FromStr for NetworkAddress {
             }
             Ok(NetworkAddress { addr: multiaddr })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libp2p::Multiaddr;
+
+    #[test]
+    fn test_from_ip_port() -> Result<(), Box<dyn std::error::Error>> {
+        let address_string = "1.2.3.4:22";
+        let multiaddr_string = "/ip4/1.2.3.4/tcp/22";
+        let network_address: NetworkAddress = address_string.parse()?;
+        let multiaddr: Multiaddr = multiaddr_string.parse()?;
+
+        assert_eq!(multiaddr, network_address);
+
+        assert_eq!(address_string, network_address.as_network_string()?);
+        assert_eq!(multiaddr_string, network_address.as_multaddr_string());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_dns_port() -> Result<(), Box<dyn std::error::Error>> {
+        let address_string = "www.foo.com:22";
+        let multiaddr_string = "/dns/www.foo.com/tcp/22";
+        let network_address: NetworkAddress = address_string.parse()?;
+        let multiaddr: Multiaddr = multiaddr_string.parse()?;
+
+        assert_eq!(multiaddr, network_address);
+
+        assert_eq!(address_string, network_address.as_network_string()?);
+        assert_eq!(multiaddr_string, network_address.as_multaddr_string());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_multiaddr() -> Result<(), Box<dyn std::error::Error>> {
+        let address_string = "1.2.3.4:22";
+        let multiaddr_string = "/ip4/1.2.3.4/tcp/22";
+        let network_address: NetworkAddress = multiaddr_string.parse()?;
+        let multiaddr: Multiaddr = multiaddr_string.parse()?;
+
+        assert_eq!(multiaddr, network_address);
+
+        assert_eq!(address_string, network_address.as_network_string()?);
+        assert_eq!(multiaddr_string, network_address.as_multaddr_string());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_onion_address() -> Result<(), Box<dyn std::error::Error>> {
+        let address_string = "nytimesn7cgmftshazwhfgzm37qxb44r64ytbb2dj3x62d2lljsciiyd.onion:22";
+        let multiaddr_string =
+            "/onion3/nytimesn7cgmftshazwhfgzm37qxb44r64ytbb2dj3x62d2lljsciiyd:22";
+        let network_address: NetworkAddress = address_string.parse()?;
+        let multiaddr: Multiaddr = multiaddr_string.parse()?;
+
+        assert_eq!(multiaddr, network_address);
+
+        assert_eq!(address_string, network_address.as_network_string()?);
+        assert_eq!(multiaddr_string, network_address.as_multaddr_string());
+
+        Ok(())
     }
 }
