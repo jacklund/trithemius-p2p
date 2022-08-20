@@ -4,14 +4,14 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use libp2p::gossipsub::IdentTopic;
-use libp2p::{core::transport::ListenerId, multiaddr::Protocol, Multiaddr, PeerId};
+use libp2p::{core::transport::ListenerId, PeerId};
 use log::debug;
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::str::FromStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use trithemiuslib::{
-    network_addr::NetworkAddress, subscriptions::Subscriptions, ChatMessage, Engine, InputEvent,
+    network_addr::NetworkAddress,
+    subscriptions::{SubscriptionError, Subscriptions},
+    ChatMessage, Engine, InputEvent,
 };
 
 use tui::backend::CrosstermBackend;
@@ -111,11 +111,98 @@ impl Drop for Renderer {
     }
 }
 
+struct SubscriptionList {
+    list: Vec<String>,
+    current_index: Option<usize>,
+}
+
+impl SubscriptionList {
+    fn new() -> Self {
+        Self {
+            list: Vec::new(),
+            current_index: None,
+        }
+    }
+
+    fn names(&self) -> &Vec<String> {
+        &self.list
+    }
+
+    fn subscribe(&mut self, topic: &str) {
+        self.list.push(topic.to_string());
+        self.current_index = Some(self.list.len() - 1);
+    }
+
+    fn unsubscribe(&mut self, topic: &str) -> Result<(), SubscriptionError> {
+        match self.list.iter().position(|t| t == topic) {
+            Some(index) => {
+                self.list.swap_remove(index);
+                if self.list.is_empty() {
+                    self.current_index = None;
+                } else {
+                    match self.current_index {
+                        Some(current) => {
+                            if current >= index {
+                                self.current_index = Some(current - 1);
+                            }
+                        }
+                        None => {
+                            panic!("Current subscription index is None when it shouldn't be");
+                        }
+                    }
+                }
+                Ok(())
+            }
+            None => Err(SubscriptionError::NoSuchTopic(topic.to_string())),
+        }
+    }
+
+    fn current(&self) -> Option<&String> {
+        match self.current_index {
+            Some(index) => self.list.get(index),
+            None => None,
+        }
+    }
+
+    fn current_index(&self) -> Option<usize> {
+        self.current_index
+    }
+
+    fn next(&mut self) -> Option<&String> {
+        match self.current_index {
+            Some(index) => {
+                if index == self.list.len() - 1 {
+                    self.current_index = Some(0);
+                } else {
+                    self.current_index = Some(index + 1);
+                }
+                self.current()
+            }
+            None => None,
+        }
+    }
+
+    fn prev(&mut self) -> Option<&String> {
+        match self.current_index {
+            Some(index) => {
+                if index == 0 {
+                    self.current_index = Some(self.list.len() - 1);
+                } else {
+                    self.current_index = Some(index - 1);
+                }
+                self.current()
+            }
+            None => None,
+        }
+    }
+}
+
 pub struct UI {
     my_identity: PeerId,
     messages: Vec<ChatMessage>,
     log_messages: Vec<LogMessage>,
     subscriptions: Subscriptions,
+    subscription_list: SubscriptionList,
     scroll_messages_view: usize,
     input: Vec<char>,
     input_cursor: usize,
@@ -135,6 +222,7 @@ impl UI {
             messages: Vec::new(),
             log_messages: Vec::new(),
             subscriptions: Subscriptions::new(),
+            subscription_list: SubscriptionList::new(),
             scroll_messages_view: 0,
             input: Vec::new(),
             input_cursor: 0,
@@ -182,6 +270,7 @@ impl UI {
         match engine.subscribe(topic_name) {
             Ok(true) => {
                 self.subscriptions.add(topic_name);
+                self.subscription_list.subscribe(topic_name);
                 self.log_info(&format!("Subscribed to topic '{}'", topic_name))
             }
             Ok(false) => self.log_info(&format!("Already subscribed to topic '{}'", topic_name)),
@@ -195,10 +284,15 @@ impl UI {
     fn unsubscribe(&mut self, engine: &mut Engine, topic_name: &str) {
         match engine.unsubscribe(topic_name) {
             Ok(true) => match self.subscriptions.remove(topic_name) {
-                Some(_) => self.log_info(&format!("Unsubscribed to topic '{}'", topic_name)),
+                Some(_) => {
+                    self.log_info(&format!("Unsubscribed to topic '{}'", topic_name));
+                    if let Err(error) = self.subscription_list.unsubscribe(topic_name) {
+                        self.log_error(&format!("Error unsubscribing: {}", error));
+                    }
+                }
                 None => self.log_error(&format!("Not subscribed to topic '{}'", topic_name)),
             },
-            Ok(false) => self.log_info(&format!("Never subscribed to topic '{}'", topic_name)),
+            Ok(false) => self.log_info(&format!("Not subscribed to topic '{}'", topic_name)),
             Err(error) => self.log_error(&format!(
                 "Error unsubscribing from topic {}: {}",
                 topic_name, error
@@ -384,19 +478,28 @@ impl UI {
                             self.handle_command(engine, command.split_whitespace().collect())
                                 .await
                         } else {
-                            match self.subscriptions.current_mut() {
-                                Some(subscription) => {
-                                    let topic = subscription.topic.clone();
-                                    let message = ChatMessage::new(
-                                        Some(self.my_identity),
-                                        topic,
-                                        input.clone(),
-                                    );
-                                    subscription.add_message(message);
-                                    Ok(Some(InputEvent::Message {
-                                        topic: IdentTopic::new(subscription.topic.clone()),
-                                        message: input.into_bytes(),
-                                    }))
+                            match self.subscription_list.current_index() {
+                                Some(_) => {
+                                    let topic = self.subscription_list.current().unwrap();
+                                    match self.subscriptions.get_mut(topic) {
+                                        Some(subscription) => {
+                                            let topic = subscription.topic.clone();
+                                            let message = ChatMessage::new(
+                                                Some(self.my_identity),
+                                                topic,
+                                                input.clone(),
+                                            );
+                                            subscription.add_message(message);
+                                            Ok(Some(InputEvent::Message {
+                                                topic: IdentTopic::new(subscription.topic.clone()),
+                                                message: input.into_bytes(),
+                                            }))
+                                        }
+                                        None => {
+                                            self.log_error("Not currently subscribed to anything");
+                                            Ok(None)
+                                        }
+                                    }
                                 }
                                 None => {
                                     self.log_error("Not currently subscribed to anything");
@@ -418,7 +521,7 @@ impl UI {
                 }
                 KeyCode::Left => {
                     if modifiers == KeyModifiers::CONTROL {
-                        self.subscriptions.prev();
+                        self.subscription_list.prev();
                     } else {
                         self.input_move_cursor(CursorMovement::Left);
                     }
@@ -426,7 +529,7 @@ impl UI {
                 }
                 KeyCode::Right => {
                     if modifiers == KeyModifiers::CONTROL {
-                        self.subscriptions.next();
+                        self.subscription_list.next();
                     } else {
                         self.input_move_cursor(CursorMovement::Right);
                     }
@@ -540,7 +643,7 @@ impl UI {
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
-        match self.subscriptions.get(&message.topic) {
+        match self.subscriptions.get_mut(&message.topic) {
             Some(subscription) => subscription.add_message(message),
             None => (),
         }
@@ -568,7 +671,7 @@ impl UI {
 
     pub fn draw(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
         // debug!("UI::draw called");
-        match self.subscriptions.current() {
+        match self.subscription_list.current() {
             Some(_) => {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
@@ -660,24 +763,25 @@ impl UI {
     }
 
     fn draw_chat_tabs(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
-        let names = self
-            .subscriptions
-            .iter()
-            .map(|s| Spans::from(s.topic.clone()))
-            .collect();
-
-        let tabs = Tabs::new(names)
-            .block(Block::default().title("Chats").borders(Borders::ALL))
-            .style(Style::default().fg(Color::White))
-            .highlight_style(Style::default().fg(Color::Yellow))
-            .select(self.subscriptions.current_index().unwrap());
+        let tabs = Tabs::new(
+            self.subscription_list
+                .names()
+                .iter()
+                .map(|s| Spans::from(s.clone()))
+                .collect(),
+        )
+        .block(Block::default().title("Chats").borders(Borders::ALL))
+        .style(Style::default().fg(Color::White))
+        .highlight_style(Style::default().fg(Color::Yellow))
+        .select(self.subscription_list.current_index().unwrap());
 
         frame.render_widget(tabs, chunk);
     }
 
     fn draw_chat_panel(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
-        match self.subscriptions.current() {
-            Some(subscription) => {
+        match self.subscription_list.current() {
+            Some(topic) => {
+                let subscription = self.subscriptions.get(topic).unwrap();
                 let messages = subscription
                     .messages
                     .iter()

@@ -1,6 +1,21 @@
 use crate::ChatMessage;
 use circular_queue::CircularQueue;
+use std::collections::{hash_map, HashMap};
 
+#[derive(Debug)]
+pub enum SubscriptionError {
+    NoSuchTopic(String),
+}
+
+impl std::fmt::Display for SubscriptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            SubscriptionError::NoSuchTopic(topic) => write!(f, "Not subscribed to topic {}", topic),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Subscription {
     pub topic: String,
     pub messages: CircularQueue<ChatMessage>,
@@ -19,115 +34,57 @@ impl Subscription {
     }
 }
 
+impl PartialEq for Subscription {
+    fn eq(&self, other: &Self) -> bool {
+        self.topic == other.topic
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Subscriptions {
-    subscriptions: Vec<Subscription>,
-    current_subscription_index: Option<usize>,
+    subscriptions: HashMap<String, Subscription>,
 }
 
 impl Subscriptions {
     pub fn new() -> Self {
         Self {
-            subscriptions: Vec::new(),
-            current_subscription_index: None,
+            subscriptions: HashMap::new(),
         }
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, Subscription> {
+    pub fn iter(&self) -> hash_map::Iter<String, Subscription> {
         self.subscriptions.iter()
-    }
-
-    pub fn next(&mut self) -> Option<&mut Subscription> {
-        match self.current_subscription_index {
-            Some(index) => {
-                if index == self.subscriptions.len() - 1 {
-                    self.current_subscription_index = Some(0);
-                } else {
-                    self.current_subscription_index = Some(index + 1);
-                }
-                self.current_mut()
-            }
-            None => None,
-        }
-    }
-
-    pub fn prev(&mut self) -> Option<&mut Subscription> {
-        match self.current_subscription_index {
-            Some(index) => {
-                if index == 0 {
-                    self.current_subscription_index = Some(self.subscriptions.len() - 1);
-                } else {
-                    self.current_subscription_index = Some(index - 1);
-                }
-                self.current_mut()
-            }
-            None => None,
-        }
-    }
-
-    pub fn current(&self) -> Option<&Subscription> {
-        match self.current_subscription_index {
-            Some(index) => self.subscriptions.get(index),
-            None => None,
-        }
-    }
-
-    pub fn current_mut(&mut self) -> Option<&mut Subscription> {
-        match self.current_subscription_index {
-            Some(index) => self.subscriptions.get_mut(index),
-            None => None,
-        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.subscriptions.is_empty()
     }
 
-    pub fn current_index(&self) -> Option<usize> {
-        self.current_subscription_index
-    }
-
     pub fn add(&mut self, topic: &str) {
-        self.subscriptions.push(Subscription::new(topic));
-        self.current_subscription_index = Some(self.subscriptions.len() - 1);
+        self.subscriptions
+            .insert(topic.to_string(), Subscription::new(topic));
     }
 
     pub fn remove(&mut self, topic: &str) -> Option<Subscription> {
-        match self.get_index(topic) {
-            Some(index) => {
-                let subscription = self.subscriptions.swap_remove(index);
-                match self.current_subscription_index {
-                    Some(current) => {
-                        if current > index {
-                            self.current_subscription_index = Some(current - 1);
-                        }
-                        if current == index {
-                            if current > 0 {
-                                self.current_subscription_index = Some(current - 1);
-                            } else {
-                                if self.subscriptions.is_empty() {
-                                    self.current_subscription_index = None;
-                                }
-                            }
-                        }
-                        Some(subscription)
-                    }
-                    None => panic!("This shouldn't happen!"),
-                }
-            }
-            None => None,
-        }
+        self.subscriptions.remove(topic)
     }
 
-    fn get_index(&self, topic_name: &str) -> Option<usize> {
-        self.subscriptions
-            .iter()
-            .position(|t| t.topic == topic_name)
+    pub fn get(&self, topic_name: &str) -> Option<&Subscription> {
+        self.subscriptions.get(topic_name)
     }
 
-    pub fn get(&mut self, topic_name: &str) -> Option<&mut Subscription> {
-        match self.get_index(topic_name) {
-            Some(index) => self.subscriptions.get_mut(index),
-            None => None,
+    pub fn get_mut(&mut self, topic_name: &str) -> Option<&mut Subscription> {
+        self.subscriptions.get_mut(topic_name)
+    }
+
+    pub fn add_message(
+        &mut self,
+        topic: &str,
+        message: ChatMessage,
+    ) -> Result<(), SubscriptionError> {
+        match self.get_mut(topic) {
+            Some(subscription) => Ok(subscription.add_message(message)),
+            None => Err(SubscriptionError::NoSuchTopic(topic.to_string())),
         }
     }
 }
