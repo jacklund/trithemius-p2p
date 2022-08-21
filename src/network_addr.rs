@@ -10,6 +10,13 @@ pub struct NetworkAddress {
     addr: Multiaddr,
 }
 
+impl std::fmt::Display for NetworkAddress {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.addr)
+    }
+}
+
 impl NetworkAddress {
     pub fn as_multaddr_string(&self) -> String {
         self.addr.to_string()

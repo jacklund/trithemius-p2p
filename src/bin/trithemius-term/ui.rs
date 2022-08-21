@@ -320,6 +320,7 @@ impl UI {
     ) -> Result<(), Box<dyn std::error::Error>> {
         match address.parse::<NetworkAddress>() {
             Ok(network_addr) => {
+                self.log_info(&format!("Connecting to {}", network_addr));
                 engine.dial(network_addr.into())?;
             }
             Err(error) => {
