@@ -733,7 +733,7 @@ impl UI {
     ) {
         let messages = self
             .log_messages
-            .iter()
+            .asc_iter()
             .map(|message| {
                 let date = message.date.format("%H:%M:%S ").to_string();
                 let color = match message.level {
@@ -784,7 +784,7 @@ impl UI {
                 let subscription = self.subscriptions.get(topic).unwrap();
                 let messages = subscription
                     .messages
-                    .iter()
+                    .asc_iter()
                     .map(|message| {
                         let color = match self.get_user_id(&message.user) {
                             Some(id) => self.message_colors[id % self.message_colors.len()],
