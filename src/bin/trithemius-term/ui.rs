@@ -265,7 +265,7 @@ impl UI {
         (position.0 as u16, position.1 as u16)
     }
 
-    fn subscribe(&mut self, engine: &mut Engine, topic_name: &str) {
+    pub fn subscribe(&mut self, engine: &mut Engine, topic_name: &str) {
         match engine.subscribe(topic_name) {
             Ok(true) => {
                 self.subscriptions.add(topic_name);
@@ -280,7 +280,7 @@ impl UI {
         };
     }
 
-    fn unsubscribe(&mut self, engine: &mut Engine, topic_name: &str) {
+    pub fn unsubscribe(&mut self, engine: &mut Engine, topic_name: &str) {
         match engine.unsubscribe(topic_name) {
             Ok(true) => match self.subscriptions.remove(topic_name) {
                 Some(_) => {
@@ -299,7 +299,7 @@ impl UI {
         };
     }
 
-    fn listen(
+    pub fn listen(
         &mut self,
         engine: &mut Engine,
         address: &str,
@@ -313,7 +313,7 @@ impl UI {
         }
     }
 
-    fn connect(
+    pub fn connect(
         &mut self,
         engine: &mut Engine,
         address: &str,
@@ -330,7 +330,7 @@ impl UI {
         Ok(())
     }
 
-    async fn create_onion_service(
+    pub async fn create_onion_service(
         &mut self,
         engine: &mut Engine,
         virt_port_str: &str,

@@ -21,7 +21,7 @@ resize = "0.7.2"
 chrono = "0.4.19"
 rgb = "0.8.27"
 unicode-width = "0.1.9"
-clap = "2.33.3"
+clap = { version = "3.2.17", features = ["cargo", "derive"] }
 serde = "1.0.130"
 void = "1.0.2"
 simple-logging = "2.0.2"

@@ -1,5 +1,6 @@
 use crate::ui::{Renderer, UI};
 use async_trait::async_trait;
+use clap::Parser;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
@@ -44,15 +45,17 @@ impl futures::stream::FusedStream for TermInputStream {
 
 struct MyHandler {
     my_identity: PeerId,
+    cli: Cli,
     ui: UI,
     known_peers: Vec<PeerId>,
     renderer: Renderer,
 }
 
 impl MyHandler {
-    fn new(my_identity: PeerId) -> Self {
+    fn new(my_identity: PeerId, cli: Cli) -> Self {
         Self {
             my_identity,
+            cli,
             ui: UI::new(my_identity),
             known_peers: Vec::new(),
             renderer: Renderer::new(),
@@ -63,6 +66,36 @@ impl MyHandler {
 #[async_trait]
 impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     type Event = TermEvent;
+
+    async fn startup(&mut self, engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(address) = &self.cli.listen {
+            self.ui.listen(engine, &address)?;
+        }
+
+        if let Some(address) = &self.cli.connect {
+            self.ui.connect(engine, &address)?;
+        }
+
+        if let Some(topic) = &self.cli.subscribe {
+            self.ui.subscribe(engine, &topic);
+        }
+
+        if let Some(topic) = &self.cli.unsubscribe {
+            self.ui.unsubscribe(engine, &topic);
+        }
+
+        if let Some(ports) = &self.cli.create_onion_service {
+            if ports.len() == 2 {
+                self.ui
+                    .create_onion_service(engine, &ports[0], Some(&ports[1]))
+                    .await;
+            } else {
+                self.ui.create_onion_service(engine, &ports[0], None).await;
+            }
+        }
+
+        Ok(())
+    }
 
     async fn handle_input(
         &mut self,
@@ -181,11 +214,32 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     }
 }
 
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+pub struct Cli {
+    #[clap(long, value_parser, value_name = "TOPIC")]
+    subscribe: Option<String>,
+
+    #[clap(long, value_parser, value_name = "TOPIC")]
+    unsubscribe: Option<String>,
+
+    #[clap(long, value_parser, value_name = "ADDRESS")]
+    listen: Option<String>,
+
+    #[clap(long, value_parser, value_name = "ADDRESS")]
+    connect: Option<String>,
+
+    #[clap(long, max_values(2), value_name = "ADDRESS")]
+    create_onion_service: Option<Vec<String>>,
+}
+
 /// The `tokio::main` attribute sets up a tokio runtime.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env_logger::init();
     // simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
+
+    let cli = Cli::parse();
 
     // Create a random PeerId
     let id_keys = identity::Keypair::generate_ed25519();
@@ -198,7 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a Swarm to manage peers and events.
     let mut engine = Engine::new(id_keys, transport, peer_id)?;
 
-    let mut handler = MyHandler::new(peer_id);
+    let mut handler = MyHandler::new(peer_id, cli);
     handler
         .ui
         .log_info(&format!("Local peer id: {:?}", peer_id));

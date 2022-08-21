@@ -102,6 +102,8 @@ pub fn create_transport(
 pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
     type Event;
 
+    async fn startup(&mut self, engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>>;
+
     async fn handle_input(
         &mut self,
         engine: &mut Engine,
@@ -231,6 +233,8 @@ impl Engine {
         mut input_stream: F,
         mut handler: H,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        handler.startup(self).await?;
+
         loop {
             handler.update().await?;
 
