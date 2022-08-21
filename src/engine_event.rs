@@ -1,16 +1,33 @@
 use crate::ChatMessage;
+use either::Either;
 use libp2p::{
+    autonat::{Event as AutonatEvent, InboundProbeEvent, NatStatus, OutboundProbeEvent},
     core::{either::EitherError, transport::ListenerId, ConnectedPoint},
     gossipsub::{error::GossipsubHandlerError, GossipsubEvent, MessageId, TopicHash},
     mdns::MdnsEvent,
     ping::{Failure, PingEvent},
-    swarm::{ConnectionError, DialError, PendingConnectionError, SwarmEvent},
+    swarm::{
+        ConnectionError, ConnectionHandlerUpgrErr, DialError, PendingConnectionError, SwarmEvent,
+    },
     Multiaddr, PeerId, TransportError,
+};
+use libp2p_dcutr::{
+    behaviour::{Event as DcutrEvent, UpgradeError},
+    InboundUpgradeError, OutboundUpgradeError,
 };
 
 use std::num::NonZeroU32;
 
-type HandlerError = EitherError<GossipsubHandlerError, Failure>;
+type HandlerError = EitherError<
+    EitherError<
+        EitherError<GossipsubHandlerError, Failure>,
+        ConnectionHandlerUpgrErr<std::io::Error>,
+    >,
+    Either<
+        ConnectionHandlerUpgrErr<EitherError<InboundUpgradeError, OutboundUpgradeError>>,
+        Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
+    >,
+>;
 
 #[derive(Debug)]
 pub struct DiscoveredPeer {
@@ -89,6 +106,32 @@ pub enum EngineEvent {
     GossipsubNotSupported {
         peer_id: PeerId,
     },
+
+    // DCUTR
+    InitiatedDirectConnectionUpgrade {
+        remote_peer_id: PeerId,
+        local_relayed_addr: Multiaddr,
+    },
+    RemoteInitiatedDirectConnectionUpgrade {
+        remote_peer_id: PeerId,
+        remote_relayed_addr: Multiaddr,
+    },
+    DirectConnectionUpgradeSucceeded {
+        remote_peer_id: PeerId,
+    },
+    DirectConnectionUpgradeFailed {
+        remote_peer_id: PeerId,
+        error: UpgradeError,
+    },
+
+    // Autonat
+    InboundProbe(InboundProbeEvent),
+    OutboundProbe(OutboundProbeEvent),
+    StatusChanged {
+        old: NatStatus,
+        new: NatStatus,
+    },
+
     Shutdown,
 }
 
@@ -167,6 +210,53 @@ impl From<SwarmEvent<EngineEvent, HandlerError>> for EngineEvent {
             SwarmEvent::OutgoingConnectionError { peer_id, error } => {
                 EngineEvent::OutgoingConnectionError { peer_id, error }
             }
+        }
+    }
+}
+
+impl From<DcutrEvent> for EngineEvent {
+    fn from(event: DcutrEvent) -> Self {
+        match event {
+            DcutrEvent::InitiatedDirectConnectionUpgrade {
+                remote_peer_id: PeerId,
+                local_relayed_addr: Multiaddr,
+            } => EngineEvent::InitiatedDirectConnectionUpgrade {
+                remote_peer_id: PeerId,
+                local_relayed_addr: Multiaddr,
+            },
+            DcutrEvent::RemoteInitiatedDirectConnectionUpgrade {
+                remote_peer_id: PeerId,
+                remote_relayed_addr: Multiaddr,
+            } => EngineEvent::RemoteInitiatedDirectConnectionUpgrade {
+                remote_peer_id: PeerId,
+                remote_relayed_addr: Multiaddr,
+            },
+            DcutrEvent::DirectConnectionUpgradeSucceeded {
+                remote_peer_id: PeerId,
+            } => EngineEvent::DirectConnectionUpgradeSucceeded {
+                remote_peer_id: PeerId,
+            },
+            DcutrEvent::DirectConnectionUpgradeFailed {
+                remote_peer_id: PeerId,
+                error: UpgradeError,
+            } => EngineEvent::DirectConnectionUpgradeFailed {
+                remote_peer_id: PeerId,
+                error: UpgradeError,
+            },
+        }
+    }
+}
+
+impl From<AutonatEvent> for EngineEvent {
+    fn from(event: AutonatEvent) -> Self {
+        match event {
+            AutonatEvent::InboundProbe(InboundProbeEvent) => {
+                EngineEvent::InboundProbe(InboundProbeEvent)
+            }
+            AutonatEvent::OutboundProbe(OutboundProbeEvent) => {
+                EngineEvent::OutboundProbe(OutboundProbeEvent)
+            }
+            AutonatEvent::StatusChanged { old, new } => EngineEvent::StatusChanged { old, new },
         }
     }
 }

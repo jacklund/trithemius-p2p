@@ -14,6 +14,7 @@ use chrono::{DateTime, Local};
 use engine_event::EngineEvent;
 use futures::stream::FusedStream;
 use libp2p::{
+    autonat::{Behaviour as Autonat, Config as AutonatConfig},
     core::{muxing::StreamMuxerBox, transport::Boxed, transport::ListenerId, upgrade},
     futures::StreamExt,
     gossipsub::{
@@ -34,6 +35,7 @@ use libp2p::{
     Transport,
     TransportError,
 };
+use libp2p_dcutr::behaviour::Behaviour as Dcutr;
 use libp2p_dns::TokioDnsConfig;
 use libp2p_tcp::GenTcpConfig;
 use log::debug;
@@ -45,6 +47,8 @@ use std::time::Duration;
 pub struct EngineBehaviour {
     pub_sub: Gossipsub,
     ping: Ping,
+    autonat: Autonat,
+    dcutr: Dcutr,
 }
 
 #[derive(Debug)]
@@ -143,6 +147,8 @@ impl Engine {
             pub_sub: Gossipsub::new(MessageAuthenticity::Signed(key), gossipsub_config)
                 .expect("Correct configuration"),
             ping: Ping::new(PingConfig::new().with_keep_alive(true)),
+            autonat: Autonat::new(peer_id, AutonatConfig::default()), // TODO: Make this config
+            dcutr: Dcutr::new(),
         };
 
         let swarm = SwarmBuilder::new(transport, behaviour, peer_id)

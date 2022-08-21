@@ -46,3 +46,5 @@ parking_lot = "0.12.1"
 tokio-socks = "0.5.1"
 libp2p-dns = { version = "0.34.0", features = ["tokio"] }
 circular-queue = "0.2.6"
+libp2p-dcutr = "0.4.0"
+either = "1.8.0"
