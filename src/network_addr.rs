@@ -5,7 +5,7 @@ use libp2p::{
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NetworkAddress {
     addr: Multiaddr,
 }
@@ -81,6 +81,9 @@ impl std::str::FromStr for NetworkAddress {
             })
         } else {
             let mut multiaddr = Multiaddr::empty();
+            if !addr.contains(':') {
+                return Err(Error::ParsingError("No port specified".into()));
+            }
             let parts = addr.split(':').collect::<Vec<&str>>();
             let port = match parts[1].parse::<u16>() {
                 Ok(port) => port,
