@@ -22,6 +22,7 @@ use libp2p::{
         Gossipsub, GossipsubConfigBuilder, IdentTopic, MessageAuthenticity, MessageId,
         ValidationMode,
     },
+    identify::{Identify, IdentifyConfig},
     identity,
     mplex,
     noise,
@@ -49,6 +50,7 @@ pub struct EngineBehaviour {
     ping: Ping,
     autonat: Autonat,
     dcutr: Dcutr,
+    identify: Identify,
 }
 
 #[derive(Debug)]
@@ -144,11 +146,12 @@ impl Engine {
             .expect("Valid config");
 
         let behaviour = EngineBehaviour {
-            pub_sub: Gossipsub::new(MessageAuthenticity::Signed(key), gossipsub_config)
+            pub_sub: Gossipsub::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config)
                 .expect("Correct configuration"),
             ping: Ping::new(PingConfig::new().with_keep_alive(true)),
             autonat: Autonat::new(peer_id, AutonatConfig::default()), // TODO: Make this config
             dcutr: Dcutr::new(),
+            identify: Identify::new(IdentifyConfig::new("ipfs/1.0.0".to_string(), key.public())),
         };
 
         let swarm = SwarmBuilder::new(transport, behaviour, peer_id)

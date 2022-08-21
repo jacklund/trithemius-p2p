@@ -4,6 +4,7 @@ use libp2p::{
     autonat::{Event as AutonatEvent, InboundProbeEvent, NatStatus, OutboundProbeEvent},
     core::{either::EitherError, transport::ListenerId, ConnectedPoint},
     gossipsub::{error::GossipsubHandlerError, GossipsubEvent, MessageId, TopicHash},
+    identify::{IdentifyEvent, IdentifyInfo, UpgradeError as IdentifyUpgradeError},
     mdns::MdnsEvent,
     ping::{Failure, PingEvent},
     swarm::{
@@ -12,7 +13,7 @@ use libp2p::{
     Multiaddr, PeerId, TransportError,
 };
 use libp2p_dcutr::{
-    behaviour::{Event as DcutrEvent, UpgradeError},
+    behaviour::{Event as DcutrEvent, UpgradeError as DcutrUpgradeError},
     InboundUpgradeError, OutboundUpgradeError,
 };
 
@@ -20,13 +21,16 @@ use std::num::NonZeroU32;
 
 type HandlerError = EitherError<
     EitherError<
-        EitherError<GossipsubHandlerError, Failure>,
-        ConnectionHandlerUpgrErr<std::io::Error>,
+        EitherError<
+            EitherError<GossipsubHandlerError, Failure>,
+            ConnectionHandlerUpgrErr<std::io::Error>,
+        >,
+        either::Either<
+            ConnectionHandlerUpgrErr<EitherError<InboundUpgradeError, OutboundUpgradeError>>,
+            either::Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
+        >,
     >,
-    Either<
-        ConnectionHandlerUpgrErr<EitherError<InboundUpgradeError, OutboundUpgradeError>>,
-        Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
-    >,
+    std::io::Error,
 >;
 
 #[derive(Debug)]
@@ -107,6 +111,22 @@ pub enum EngineEvent {
         peer_id: PeerId,
     },
 
+    // Identify
+    IdentifyReceived {
+        peer_id: PeerId,
+        info: IdentifyInfo,
+    },
+    IdentifySent {
+        peer_id: PeerId,
+    },
+    IdentifyPushed {
+        peer_id: PeerId,
+    },
+    IdentifyError {
+        peer_id: PeerId,
+        error: ConnectionHandlerUpgrErr<IdentifyUpgradeError>,
+    },
+
     // DCUTR
     InitiatedDirectConnectionUpgrade {
         remote_peer_id: PeerId,
@@ -121,7 +141,7 @@ pub enum EngineEvent {
     },
     DirectConnectionUpgradeFailed {
         remote_peer_id: PeerId,
-        error: UpgradeError,
+        error: DcutrUpgradeError,
     },
 
     // Autonat
@@ -238,10 +258,10 @@ impl From<DcutrEvent> for EngineEvent {
             },
             DcutrEvent::DirectConnectionUpgradeFailed {
                 remote_peer_id: PeerId,
-                error: UpgradeError,
+                error: DcutrUpgradeError,
             } => EngineEvent::DirectConnectionUpgradeFailed {
                 remote_peer_id: PeerId,
-                error: UpgradeError,
+                error: DcutrUpgradeError,
             },
         }
     }
@@ -257,6 +277,17 @@ impl From<AutonatEvent> for EngineEvent {
                 EngineEvent::OutboundProbe(OutboundProbeEvent)
             }
             AutonatEvent::StatusChanged { old, new } => EngineEvent::StatusChanged { old, new },
+        }
+    }
+}
+
+impl From<IdentifyEvent> for EngineEvent {
+    fn from(event: IdentifyEvent) -> Self {
+        match event {
+            IdentifyEvent::Received { peer_id, info } => Self::IdentifyReceived { peer_id, info },
+            IdentifyEvent::Sent { peer_id } => Self::IdentifySent { peer_id },
+            IdentifyEvent::Pushed { peer_id } => Self::IdentifyPushed { peer_id },
+            IdentifyEvent::Error { peer_id, error } => Self::IdentifyError { peer_id, error },
         }
     }
 }
