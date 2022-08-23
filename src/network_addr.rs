@@ -101,20 +101,18 @@ impl std::str::FromStr for NetworkAddress {
                 Protocol::Ip4(ipv4)
             } else if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
                 Protocol::Ip6(ipv6)
+            } else if parts[0].ends_with(".onion") {
+                let hash_string = parts[0].split('.').collect::<Vec<&str>>()[0];
+                let hash: [u8; 35] =
+                    base32::decode(base32::Alphabet::RFC4648 { padding: false }, hash_string)
+                        .unwrap()
+                        .as_slice()
+                        .try_into()
+                        .unwrap();
+                used_port = true;
+                Protocol::Onion3(Onion3Addr::from((hash, port)))
             } else {
-                if parts[0].ends_with(".onion") {
-                    let hash_string = parts[0].split(".").collect::<Vec<&str>>()[0];
-                    let hash: [u8; 35] =
-                        base32::decode(base32::Alphabet::RFC4648 { padding: false }, hash_string)
-                            .unwrap()
-                            .as_slice()
-                            .try_into()
-                            .unwrap();
-                    used_port = true;
-                    Protocol::Onion3(Onion3Addr::from((hash, port)))
-                } else {
-                    Protocol::Dns(parts[0].into())
-                }
+                Protocol::Dns(parts[0].into())
             });
             if !used_port {
                 multiaddr.push(Protocol::Tcp(port));

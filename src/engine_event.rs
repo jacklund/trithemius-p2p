@@ -1,5 +1,4 @@
 use crate::ChatMessage;
-use either::Either;
 use libp2p::{
     autonat::{Event as AutonatEvent, InboundProbeEvent, NatStatus, OutboundProbeEvent},
     core::{either::EitherError, transport::ListenerId, ConnectedPoint},
@@ -238,30 +237,28 @@ impl From<DcutrEvent> for EngineEvent {
     fn from(event: DcutrEvent) -> Self {
         match event {
             DcutrEvent::InitiatedDirectConnectionUpgrade {
-                remote_peer_id: PeerId,
-                local_relayed_addr: Multiaddr,
+                remote_peer_id,
+                local_relayed_addr,
             } => EngineEvent::InitiatedDirectConnectionUpgrade {
-                remote_peer_id: PeerId,
-                local_relayed_addr: Multiaddr,
+                remote_peer_id,
+                local_relayed_addr,
             },
             DcutrEvent::RemoteInitiatedDirectConnectionUpgrade {
-                remote_peer_id: PeerId,
-                remote_relayed_addr: Multiaddr,
+                remote_peer_id,
+                remote_relayed_addr,
             } => EngineEvent::RemoteInitiatedDirectConnectionUpgrade {
-                remote_peer_id: PeerId,
-                remote_relayed_addr: Multiaddr,
+                remote_peer_id,
+                remote_relayed_addr,
             },
-            DcutrEvent::DirectConnectionUpgradeSucceeded {
-                remote_peer_id: PeerId,
-            } => EngineEvent::DirectConnectionUpgradeSucceeded {
-                remote_peer_id: PeerId,
-            },
+            DcutrEvent::DirectConnectionUpgradeSucceeded { remote_peer_id } => {
+                EngineEvent::DirectConnectionUpgradeSucceeded { remote_peer_id }
+            }
             DcutrEvent::DirectConnectionUpgradeFailed {
-                remote_peer_id: PeerId,
-                error: DcutrUpgradeError,
+                remote_peer_id,
+                error,
             } => EngineEvent::DirectConnectionUpgradeFailed {
-                remote_peer_id: PeerId,
-                error: DcutrUpgradeError,
+                remote_peer_id,
+                error,
             },
         }
     }
@@ -270,11 +267,9 @@ impl From<DcutrEvent> for EngineEvent {
 impl From<AutonatEvent> for EngineEvent {
     fn from(event: AutonatEvent) -> Self {
         match event {
-            AutonatEvent::InboundProbe(InboundProbeEvent) => {
-                EngineEvent::InboundProbe(InboundProbeEvent)
-            }
-            AutonatEvent::OutboundProbe(OutboundProbeEvent) => {
-                EngineEvent::OutboundProbe(OutboundProbeEvent)
+            AutonatEvent::InboundProbe(inbound_event) => EngineEvent::InboundProbe(inbound_event),
+            AutonatEvent::OutboundProbe(outbound_event) => {
+                EngineEvent::OutboundProbe(outbound_event)
             }
             AutonatEvent::StatusChanged { old, new } => EngineEvent::StatusChanged { old, new },
         }

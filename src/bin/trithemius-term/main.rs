@@ -69,19 +69,19 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 
     async fn startup(&mut self, engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(address) = &self.cli.listen {
-            self.ui.listen(engine, &address)?;
+            self.ui.listen(engine, address)?;
         }
 
         if let Some(address) = &self.cli.connect {
-            self.ui.connect(engine, &address)?;
+            self.ui.connect(engine, address)?;
         }
 
         if let Some(topic) = &self.cli.subscribe {
-            self.ui.subscribe(engine, &topic);
+            self.ui.subscribe(engine, topic);
         }
 
         if let Some(topic) = &self.cli.unsubscribe {
-            self.ui.unsubscribe(engine, &topic);
+            self.ui.unsubscribe(engine, topic);
         }
 
         if let Some(ports) = &self.cli.create_onion_service {

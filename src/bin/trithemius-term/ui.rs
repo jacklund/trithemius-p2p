@@ -220,7 +220,7 @@ impl UI {
         Self {
             my_identity,
             log_messages: CircularQueue::with_capacity(200),
-            subscriptions: Subscriptions::new(),
+            subscriptions: Subscriptions::default(),
             subscription_list: SubscriptionList::new(),
             scroll_messages_view: 0,
             input: Vec::new(),
@@ -359,10 +359,7 @@ impl UI {
             .await
         {
             Ok(onion_service) => {
-                self.log_info(&format!(
-                    "Created onion service {}.onion:{}",
-                    onion_service.service_id, onion_service.virt_port
-                ));
+                self.log_info(&format!("Created onion service {}", onion_service.address,));
             }
             Err(error) => {
                 self.log_error(&format!("Error creating onion service: {}", error));
@@ -434,7 +431,7 @@ impl UI {
                                 .await;
                         }
                         _ => {
-                            self.log_error(&format!("'create-onion-service' command requires at least one port argument"));
+                            self.log_error("'create-onion-service' command requires at least one port argument");
                         }
                     };
 

@@ -40,18 +40,12 @@ impl PartialEq for Subscription {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Subscriptions {
     subscriptions: HashMap<String, Subscription>,
 }
 
 impl Subscriptions {
-    pub fn new() -> Self {
-        Self {
-            subscriptions: HashMap::new(),
-        }
-    }
-
     pub fn iter(&self) -> hash_map::Iter<String, Subscription> {
         self.subscriptions.iter()
     }
@@ -83,7 +77,10 @@ impl Subscriptions {
         message: ChatMessage,
     ) -> Result<(), SubscriptionError> {
         match self.get_mut(topic) {
-            Some(subscription) => Ok(subscription.add_message(message)),
+            Some(subscription) => {
+                subscription.add_message(message);
+                Ok(())
+            }
             None => Err(SubscriptionError::NoSuchTopic(topic.to_string())),
         }
     }
