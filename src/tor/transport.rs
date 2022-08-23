@@ -82,9 +82,22 @@ where
     type ListenerUpgrade = MapErr<T::ListenerUpgrade, fn(T::Error) -> Self::Error>;
 
     fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+        // If this an onion address, translate it to listening on the same port on localhost
+        let mut local_addr = Multiaddr::empty();
+        for protocol in addr.iter() {
+            match protocol {
+                Protocol::Onion3(addr) => {
+                    local_addr = "/ip4/127.0.0.1".parse().unwrap();
+                    local_addr.push(Protocol::Tcp(addr.port()));
+                }
+                _ => {
+                    local_addr.push(protocol);
+                }
+            }
+        }
         self.inner
             .lock()
-            .listen_on(addr)
+            .listen_on(local_addr)
             .map_err(|e| e.map(TorTransportError::Transport))
     }
 

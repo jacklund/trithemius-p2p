@@ -1,6 +1,11 @@
 use crate::tor::{auth::TorAuthentication, error::TorError};
+use base32;
 use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
+use libp2p::{
+    multiaddr::{Onion3Addr, Protocol},
+    Multiaddr,
+};
 use regex::Regex;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
@@ -11,6 +16,7 @@ pub struct OnionService {
     pub virt_port: u16,
     pub target_port: u16,
     pub service_id: String,
+    pub address: Multiaddr,
 }
 
 #[derive(Debug, PartialEq)]
@@ -199,11 +205,23 @@ impl TorControlConnection {
             static ref RE: Regex = Regex::new(r"^[^=]*=(?P<value>.*)$").unwrap();
         }
         match RE.captures(&control_response.response[0]) {
-            Some(captures) => Ok(OnionService {
-                virt_port,
-                target_port,
-                service_id: captures["value"].into(),
-            }),
+            Some(captures) => {
+                let hash_string = &captures["value"];
+                let hash: [u8; 35] =
+                    base32::decode(base32::Alphabet::RFC4648 { padding: false }, hash_string)
+                        .unwrap()
+                        .as_slice()
+                        .try_into()
+                        .unwrap();
+                let mut addr = Multiaddr::empty();
+                addr.push(Protocol::Onion3(Onion3Addr::from((hash, virt_port))));
+                Ok(OnionService {
+                    virt_port,
+                    target_port,
+                    service_id: hash_string.to_string(),
+                    address: addr,
+                })
+            }
             None => Err(TorError::ProtocolError(format!(
                 "Unexpected response: {} {}",
                 control_response.code,

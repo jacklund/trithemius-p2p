@@ -192,7 +192,8 @@ impl Engine {
             .create_transient_onion_service(virt_port, target_port)
             .await?;
 
-        self.listen(format!("/ip4/127.0.0.1/tcp/{}", target_port).parse()?)?;
+        // Send the onion address down, the Tor transport layer will translate it
+        self.listen(onion_service.address.clone())?;
 
         Ok(onion_service)
     }
