@@ -4,6 +4,10 @@ use libp2p::{
     core::{either::EitherError, transport::ListenerId, ConnectedPoint},
     gossipsub::{error::GossipsubHandlerError, GossipsubEvent, MessageId, TopicHash},
     identify::{IdentifyEvent, IdentifyInfo, UpgradeError as IdentifyUpgradeError},
+    kad::{
+        kbucket::Distance, Addresses, InboundRequest, KademliaEvent, QueryId, QueryResult,
+        QueryStats,
+    },
     mdns::MdnsEvent,
     ping::{Failure, PingEvent},
     swarm::{
@@ -21,13 +25,16 @@ use std::num::NonZeroU32;
 type HandlerError = EitherError<
     EitherError<
         EitherError<
-            EitherError<GossipsubHandlerError, Failure>,
-            ConnectionHandlerUpgrErr<std::io::Error>,
+            EitherError<
+                EitherError<GossipsubHandlerError, Failure>,
+                ConnectionHandlerUpgrErr<std::io::Error>,
+            >,
+            either::Either<
+                ConnectionHandlerUpgrErr<EitherError<InboundUpgradeError, OutboundUpgradeError>>,
+                either::Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
+            >,
         >,
-        either::Either<
-            ConnectionHandlerUpgrErr<EitherError<InboundUpgradeError, OutboundUpgradeError>>,
-            either::Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
-        >,
+        std::io::Error,
     >,
     std::io::Error,
 >;
@@ -95,14 +102,20 @@ pub enum EngineEvent {
         error: std::io::Error,
     },
     Dialing(PeerId),
-    Discovered(Vec<DiscoveredPeer>),
-    Expired(Vec<DiscoveredPeer>),
+
+    // MDNS
+    MdnsDiscovered(Vec<DiscoveredPeer>),
+    MdnsExpired(Vec<DiscoveredPeer>),
+
+    // Ping
     PingEvent(PingEvent),
-    Subscribed {
+
+    // Gossipsub
+    GossipSubscribed {
         peer_id: PeerId,
         topic: TopicHash,
     },
-    Unsubscribed {
+    GossipUnsubscribed {
         peer_id: PeerId,
         topic: TopicHash,
     },
@@ -146,9 +159,37 @@ pub enum EngineEvent {
     // Autonat
     InboundProbe(InboundProbeEvent),
     OutboundProbe(OutboundProbeEvent),
-    StatusChanged {
+    AutonatStatusChanged {
         old: NatStatus,
         new: NatStatus,
+    },
+
+    // Kademlia
+    KadInboundRequest {
+        request: InboundRequest,
+    },
+    KadOutboundQueryCompleted {
+        id: QueryId,
+        result: QueryResult,
+        stats: QueryStats,
+    },
+    KadRoutingUpdated {
+        peer: PeerId,
+        is_new_peer: bool,
+        addresses: Addresses,
+        bucket_range: (Distance, Distance),
+        old_peer: Option<PeerId>,
+    },
+    KadUnroutablePeer {
+        peer: PeerId,
+    },
+    KadRoutablePeer {
+        peer: PeerId,
+        address: Multiaddr,
+    },
+    KadPendingRoutablePeer {
+        peer: PeerId,
+        address: Multiaddr,
     },
 
     Shutdown,
@@ -271,7 +312,9 @@ impl From<AutonatEvent> for EngineEvent {
             AutonatEvent::OutboundProbe(outbound_event) => {
                 EngineEvent::OutboundProbe(outbound_event)
             }
-            AutonatEvent::StatusChanged { old, new } => EngineEvent::StatusChanged { old, new },
+            AutonatEvent::StatusChanged { old, new } => {
+                EngineEvent::AutonatStatusChanged { old, new }
+            }
         }
     }
 }
@@ -315,10 +358,10 @@ impl From<GossipsubEvent> for EngineEvent {
                 message: std::str::from_utf8(&message.data).unwrap().to_string(), // TODO: Figure out how not to unwrap this
             },
             GossipsubEvent::Subscribed { peer_id, topic } => {
-                EngineEvent::Subscribed { peer_id, topic }
+                EngineEvent::GossipSubscribed { peer_id, topic }
             }
             GossipsubEvent::Unsubscribed { peer_id, topic } => {
-                EngineEvent::Unsubscribed { peer_id, topic }
+                EngineEvent::GossipUnsubscribed { peer_id, topic }
             }
             GossipsubEvent::GossipsubNotSupported { peer_id } => {
                 EngineEvent::GossipsubNotSupported { peer_id }
@@ -330,16 +373,47 @@ impl From<GossipsubEvent> for EngineEvent {
 impl From<MdnsEvent> for EngineEvent {
     fn from(event: MdnsEvent) -> Self {
         match event {
-            MdnsEvent::Discovered(addrs_iter) => EngineEvent::Discovered(
+            MdnsEvent::Discovered(addrs_iter) => EngineEvent::MdnsDiscovered(
                 addrs_iter
                     .map(|(peer_id, address)| DiscoveredPeer { peer_id, address })
                     .collect(),
             ),
-            MdnsEvent::Expired(addrs_iter) => EngineEvent::Expired(
+            MdnsEvent::Expired(addrs_iter) => EngineEvent::MdnsExpired(
                 addrs_iter
                     .map(|(peer_id, address)| DiscoveredPeer { peer_id, address })
                     .collect(),
             ),
+        }
+    }
+}
+
+impl From<KademliaEvent> for EngineEvent {
+    fn from(event: KademliaEvent) -> Self {
+        match event {
+            KademliaEvent::InboundRequest { request } => EngineEvent::KadInboundRequest { request },
+            KademliaEvent::OutboundQueryCompleted { id, result, stats } => {
+                EngineEvent::KadOutboundQueryCompleted { id, result, stats }
+            }
+            KademliaEvent::RoutingUpdated {
+                peer,
+                is_new_peer,
+                addresses,
+                bucket_range,
+                old_peer,
+            } => EngineEvent::KadRoutingUpdated {
+                peer,
+                is_new_peer,
+                addresses,
+                bucket_range,
+                old_peer,
+            },
+            KademliaEvent::UnroutablePeer { peer } => EngineEvent::KadUnroutablePeer { peer },
+            KademliaEvent::RoutablePeer { peer, address } => {
+                EngineEvent::KadRoutablePeer { peer, address }
+            }
+            KademliaEvent::PendingRoutablePeer { peer, address } => {
+                EngineEvent::KadPendingRoutablePeer { peer, address }
+            }
         }
     }
 }

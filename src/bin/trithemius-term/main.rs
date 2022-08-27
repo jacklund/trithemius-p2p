@@ -115,7 +115,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     ) -> Result<Option<EngineEvent>, std::io::Error> {
         // debug!("Event: {:?}", event);
         Ok(match event {
-            EngineEvent::Expired(list) => {
+            EngineEvent::MdnsExpired(list) => {
                 for peer in list {
                     debug!("Peer {} left", peer.peer_id);
                 }
@@ -179,7 +179,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 self.ui.log_info(&format!("Dialing {}", peer_id,));
                 None
             }
-            EngineEvent::Discovered(peers) => {
+            EngineEvent::MdnsDiscovered(peers) => {
                 self.ui.log_info(&format!(
                     "Discovered peers: {}",
                     peers
@@ -190,14 +190,21 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 ));
                 None
             }
-            EngineEvent::Subscribed { peer_id, topic } => {
+            EngineEvent::GossipSubscribed { peer_id, topic } => {
                 self.ui
                     .log_info(&format!("Peer {} subscribed to {}", peer_id, topic));
                 None
             }
-            EngineEvent::Unsubscribed { peer_id, topic } => {
+            EngineEvent::GossipUnsubscribed { peer_id, topic } => {
                 self.ui
                     .log_info(&format!("Peer {} unsubscribed to {}", peer_id, topic));
+                None
+            }
+            EngineEvent::IdentifyReceived { peer_id, info } => {
+                self.ui.log_info(&format!(
+                    "Identify received from peer {} with info {:?}",
+                    peer_id, info
+                ));
                 None
             }
             _ => None,

@@ -7,7 +7,7 @@ use crate::tor::{
     auth::TorAuthentication,
     control_connection::{OnionService, TorControlConnection},
     error::TorError,
-    transport::TorTransportWrapper,
+    transport::TorDnsTransport,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
@@ -24,24 +24,24 @@ use libp2p::{
     },
     identify::{Identify, IdentifyConfig},
     identity,
-    mplex,
-    noise,
+    kad::{record::store::MemoryStore, Kademlia},
+    mplex, noise,
     ping::{Ping, PingConfig},
     swarm::{DialError, NetworkBehaviour, Swarm, SwarmBuilder},
-    // `TokioTcpTransport` is available through the `tcp-tokio` feature.
-    tcp::TokioTcpTransport,
-    Multiaddr,
-    NetworkBehaviour,
-    PeerId,
-    Transport,
-    TransportError,
+    Multiaddr, NetworkBehaviour, PeerId, Transport, TransportError,
 };
 use libp2p_dcutr::behaviour::Behaviour as Dcutr;
-use libp2p_dns::TokioDnsConfig;
-use libp2p_tcp::GenTcpConfig;
 use log::debug;
 use std::net::ToSocketAddrs;
+use std::str::FromStr;
 use std::time::Duration;
+
+const KAD_BOOTNODES: [&str; 4] = [
+    "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    "QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+    "QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+    "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+];
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "EngineEvent")]
@@ -50,6 +50,7 @@ pub struct EngineBehaviour {
     ping: Ping,
     autonat: Autonat,
     dcutr: Dcutr,
+    kademlia: Kademlia<MemoryStore>,
     identify: Identify,
 }
 
@@ -89,10 +90,7 @@ pub fn create_transport(
     // We wrap the base libp2p tokio TCP transport inside the tokio DNS transport, inside our Tor
     // wrapper. Tor wrapper has to be first, so that an onion address isn't resolved by the DNS
     // layer. We need the DNS layer there in case we get a DNS hostname (unlikely, but possible).
-    Ok(TorTransportWrapper::new(
-        TokioDnsConfig::system(TokioTcpTransport::new(
-            GenTcpConfig::default().nodelay(true),
-        ))?,
+    Ok(TorDnsTransport::new(
         ("127.0.0.1", 9050) // TODO: Configure the TOR SOCKS5 proxy address
             .to_socket_addrs()?
             .next()
@@ -137,7 +135,7 @@ impl Engine {
         key: identity::Keypair,
         transport: Boxed<(PeerId, StreamMuxerBox)>,
         peer_id: PeerId,
-    ) -> Result<Self, std::io::Error> {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Set a custom gossipsub
         let gossipsub_config = GossipsubConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
@@ -145,12 +143,20 @@ impl Engine {
             .build()
             .expect("Valid config");
 
+        let mut kademlia = Kademlia::new(peer_id, MemoryStore::new(peer_id));
+        let bootaddr: Multiaddr = "/dnsaddr/bootstrap.libp2p.io".parse().unwrap();
+        for peer in &KAD_BOOTNODES {
+            kademlia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
+        }
+        kademlia.bootstrap()?;
+
         let behaviour = EngineBehaviour {
             pub_sub: Gossipsub::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config)
                 .expect("Correct configuration"),
             ping: Ping::new(PingConfig::new().with_keep_alive(true)),
             autonat: Autonat::new(peer_id, AutonatConfig::default()), // TODO: Make this config
             dcutr: Dcutr::new(),
+            kademlia,
             identify: Identify::new(IdentifyConfig::new("ipfs/1.0.0".to_string(), key.public())),
         };
 
