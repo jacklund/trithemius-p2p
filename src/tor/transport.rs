@@ -1,59 +1,140 @@
 use futures::future::{FutureExt, MapErr, TryFutureExt};
 use libp2p_core::transport::{ListenerId, Transport, TransportError, TransportEvent};
-use libp2p_tcp::tokio::TcpStream;
+use libp2p_dns::{DnsErr, TokioDnsConfig};
+use libp2p_tcp::{tokio::TcpStream, GenTcpConfig, GenTcpTransport, TokioTcpTransport};
 use multiaddr::{Multiaddr, Protocol};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use tokio_socks::tcp::Socks5Stream;
 
 #[derive(Debug)]
-pub enum TorTransportError<TErr> {
-    Transport(TErr),
-    MultiaddrNotSupported(Multiaddr),
+pub enum TorDnsTransportError {
+    Transport(DnsErr<std::io::Error>),
     SocksError(tokio_socks::Error),
+    MultiaddrNotSupported(Multiaddr),
 }
 
-impl<TErr> fmt::Display for TorTransportError<TErr>
-where
-    TErr: fmt::Display,
-{
+impl fmt::Display for TorDnsTransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TorTransportError::Transport(err) => write!(f, "{}", err),
-            TorTransportError::MultiaddrNotSupported(a) => {
-                write!(f, "Unsupported resolved address: {}", a)
-            }
-            TorTransportError::SocksError(err) => write!(f, "{}", err),
-        }
+        unimplemented!()
     }
 }
 
-impl<TErr> std::error::Error for TorTransportError<TErr> where TErr: fmt::Debug + fmt::Display {}
+impl std::error::Error for TorDnsTransportError {}
 
-impl From<std::io::Error> for TorTransportError<std::io::Error> {
+impl From<std::io::Error> for TorDnsTransportError {
     fn from(error: std::io::Error) -> Self {
-        TorTransportError::Transport(error)
+        TorDnsTransportError::Transport(DnsErr::Transport(error))
     }
 }
 
-pub struct TorTransportWrapper<T> {
-    inner: Arc<Mutex<T>>,
-    proxy_addr: SocketAddr,
+impl From<DnsErr<std::io::Error>> for TorDnsTransportError {
+    fn from(error: DnsErr<std::io::Error>) -> Self {
+        TorDnsTransportError::Transport(error)
+    }
 }
 
-impl<T> TorTransportWrapper<T> {
-    pub fn new(
-        inner: T,
-        proxy_addr: SocketAddr,
-    ) -> Result<TorTransportWrapper<T>, Box<dyn std::error::Error>> {
+enum PollNext {
+    DnsTcp,
+    Tor,
+}
+
+pub struct TorDnsTransport {
+    dns_tcp: Arc<Mutex<TokioDnsConfig<TokioTcpTransport>>>,
+    tor: Arc<Mutex<TokioTcpTransport>>,
+    proxy_addr: SocketAddr,
+    poll_next: PollNext,
+    tor_map: HashMap<u16, Multiaddr>,
+}
+
+impl TorDnsTransport {
+    pub fn new(proxy_addr: SocketAddr) -> Result<Self, std::io::Error> {
         Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
+            dns_tcp: Arc::new(Mutex::new(TokioDnsConfig::system(TokioTcpTransport::new(
+                GenTcpConfig::default().nodelay(true),
+            ))?)),
+            tor: Arc::new(Mutex::new(TokioTcpTransport::new(
+                GenTcpConfig::default().nodelay(true),
+            ))),
             proxy_addr,
+            poll_next: PollNext::DnsTcp,
+            tor_map: HashMap::new(),
         })
+    }
+
+    fn poll_dns_tcp(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<TransportEvent<<Self as Transport>::ListenerUpgrade, <Self as Transport>::Error>>
+    {
+        let mut dns_tcp = self.dns_tcp.lock();
+        Transport::poll(Pin::new(dns_tcp.deref_mut()), cx).map(|event| {
+            event
+                .map_upgrade(|upgr| upgr.map_err::<_, fn(_) -> _>(TorDnsTransportError::Transport))
+                .map_err(TorDnsTransportError::Transport)
+        })
+    }
+
+    fn poll_tor(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<TransportEvent<<Self as Transport>::ListenerUpgrade, <Self as Transport>::Error>>
+    {
+        let mut tor = self.tor.lock();
+        // TODO: Catch address events and convert them
+        let mut event = Transport::poll(Pin::new(tor.deref_mut()), cx).map(|event| {
+            event
+                .map_upgrade(|upgr| upgr.map_err::<_, fn(_) -> _>(DnsErr::Transport))
+                .map_upgrade(|upgr| upgr.map_err::<_, fn(_) -> _>(TorDnsTransportError::Transport))
+                .map_err(DnsErr::Transport)
+                .map_err(TorDnsTransportError::Transport)
+        });
+
+        match event {
+            Poll::Ready(TransportEvent::NewAddress {
+                listener_id,
+                ref mut listen_addr,
+            }) => loop {
+                if let Some(Protocol::Tcp(port)) = listen_addr.pop() {
+                    match self.tor_map.get(&port) {
+                        Some(tor_addr) => {
+                            return Poll::Ready(TransportEvent::NewAddress {
+                                listener_id,
+                                listen_addr: tor_addr.clone(),
+                            });
+                        }
+                        None => {
+                            return event;
+                        }
+                    }
+                }
+            },
+            Poll::Ready(TransportEvent::AddressExpired {
+                listener_id,
+                ref mut listen_addr,
+            }) => loop {
+                if let Some(Protocol::Tcp(port)) = listen_addr.pop() {
+                    match self.tor_map.get(&port) {
+                        Some(tor_addr) => {
+                            return Poll::Ready(TransportEvent::AddressExpired {
+                                listener_id,
+                                listen_addr: tor_addr.clone(),
+                            });
+                        }
+                        None => {
+                            return event;
+                        }
+                    }
+                }
+            },
+            _ => event,
+        }
     }
 }
 
@@ -69,60 +150,74 @@ fn to_onion3_domain(mut addr: Multiaddr) -> Option<(String, u16)> {
     }
 }
 
-impl<T> Transport for TorTransportWrapper<T>
-where
-    T: Transport<Output = TcpStream> + Send + Unpin + 'static,
-    T::Dial: Send,
-    T::Error: Send,
-{
-    type Output = T::Output;
-    type Error = TorTransportError<T::Error>;
+impl Transport for TorDnsTransport {
+    type Output = TcpStream;
+    type Error = TorDnsTransportError;
     type Dial =
         std::pin::Pin<Box<dyn futures::Future<Output = Result<Self::Output, Self::Error>> + Send>>;
-    type ListenerUpgrade = MapErr<T::ListenerUpgrade, fn(T::Error) -> Self::Error>;
+    type ListenerUpgrade = MapErr<
+        <TokioDnsConfig<GenTcpTransport<libp2p_tcp::tokio::Tcp>> as Transport>::ListenerUpgrade,
+        fn(
+            <TokioDnsConfig<GenTcpTransport<libp2p_tcp::tokio::Tcp>> as Transport>::Error,
+        ) -> Self::Error,
+    >;
 
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
-        // If this an onion address, translate it to listening on the same port on localhost
+    fn listen_on(&mut self, address: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
         let mut local_addr = Multiaddr::empty();
-        for protocol in addr.iter() {
+        for protocol in address.iter() {
             match protocol {
                 Protocol::Onion3(addr) => {
-                    local_addr = "/ip4/127.0.0.1".parse().unwrap();
-                    local_addr.push(Protocol::Tcp(addr.port()));
+                    let mut tor_addr: Multiaddr = "/ip4/127.0.0.1".parse().unwrap();
+                    tor_addr.push(Protocol::Tcp(addr.port()));
+                    let result = self.tor.lock().listen_on(tor_addr).map_err(|e| match e {
+                        TransportError::Other(std_error) => TransportError::Other(std_error.into()),
+                        TransportError::MultiaddrNotSupported(addr) => {
+                            TransportError::MultiaddrNotSupported(addr)
+                        }
+                    });
+                    if result.is_ok() {
+                        self.tor_map.insert(addr.port(), address);
+                    };
+                    return result;
                 }
                 _ => {
                     local_addr.push(protocol);
                 }
             }
         }
-        self.inner
+        self.dns_tcp
             .lock()
             .listen_on(local_addr)
-            .map_err(|e| e.map(TorTransportError::Transport))
+            .map_err(|e| match e {
+                TransportError::Other(dnserr) => TransportError::Other(dnserr.into()),
+                TransportError::MultiaddrNotSupported(addr) => {
+                    TransportError::MultiaddrNotSupported(addr)
+                }
+            })
     }
 
     fn remove_listener(&mut self, id: ListenerId) -> bool {
-        self.inner.lock().remove_listener(id)
+        self.dns_tcp.lock().remove_listener(id) || self.tor.lock().remove_listener(id)
     }
 
     fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
         let proxy_addr = self.proxy_addr;
-        let inner = self.inner.clone();
+        let dns_tcp = self.dns_tcp.clone();
         Ok(async move {
             if let Some((host, port)) = to_onion3_domain(addr.clone()) {
                 match Socks5Stream::connect(proxy_addr, (host, port)).await {
                     Ok(connection) => Ok(TcpStream(connection.into_inner())),
-                    Err(error) => Err(TorTransportError::SocksError(error)),
+                    Err(error) => Err(TorDnsTransportError::SocksError(error)),
                 }
             } else {
-                let dial = inner.lock().dial(addr);
+                let dial = dns_tcp.lock().dial(addr);
                 match dial {
-                    Ok(future) => future.await.map_err(TorTransportError::Transport),
+                    Ok(future) => future.await.map_err(|e| e.into()),
                     Err(error) => match error {
                         TransportError::MultiaddrNotSupported(addr) => {
-                            Err(TorTransportError::MultiaddrNotSupported(addr))
+                            Err(TorDnsTransportError::MultiaddrNotSupported(addr))
                         }
-                        TransportError::Other(error) => Err(TorTransportError::Transport(error)),
+                        TransportError::Other(error) => Err(error.into()),
                     },
                 }
             }
@@ -134,16 +229,16 @@ where
         &mut self,
         addr: Multiaddr,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let inner = self.inner.clone();
+        let dns_tcp = self.dns_tcp.clone();
         Ok(async move {
-            let dial = inner.lock().dial_as_listener(addr);
+            let dial = dns_tcp.lock().dial_as_listener(addr);
             match dial {
-                Ok(future) => future.await.map_err(TorTransportError::Transport),
+                Ok(future) => future.await.map_err(|e| e.into()),
                 Err(error) => match error {
                     TransportError::MultiaddrNotSupported(addr) => {
-                        Err(TorTransportError::MultiaddrNotSupported(addr))
+                        Err(TorDnsTransportError::MultiaddrNotSupported(addr))
                     }
-                    TransportError::Other(error) => Err(TorTransportError::Transport(error)),
+                    TransportError::Other(error) => Err(error.into()),
                 },
             }
         }
@@ -151,19 +246,39 @@ where
     }
 
     fn address_translation(&self, listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.inner.lock().address_translation(listen, observed)
+        self.dns_tcp.lock().address_translation(listen, observed)
     }
 
     fn poll(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
-        let mut inner = self.inner.lock();
-        Transport::poll(Pin::new(inner.deref_mut()), cx).map(|event| {
-            event
-                .map_upgrade(|upgr| upgr.map_err::<_, fn(_) -> _>(TorTransportError::Transport))
-                .map_err(TorTransportError::Transport)
-        })
+    ) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
+        match self.poll_next {
+            PollNext::DnsTcp => {
+                let event = self.as_mut().poll_dns_tcp(cx);
+                match event {
+                    Poll::Pending => (),
+                    _ => {
+                        self.as_mut().poll_next = PollNext::Tor;
+                        return event;
+                    }
+                }
+
+                self.poll_tor(cx)
+            }
+            PollNext::Tor => {
+                let event = self.as_mut().poll_tor(cx);
+                match event {
+                    Poll::Pending => (),
+                    _ => {
+                        self.as_mut().poll_next = PollNext::DnsTcp;
+                        return event;
+                    }
+                }
+
+                self.poll_dns_tcp(cx)
+            }
+        }
     }
 }
 
