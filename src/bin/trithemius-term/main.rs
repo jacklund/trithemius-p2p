@@ -4,7 +4,7 @@ use clap::Parser;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
-use libp2p::{identity, PeerId};
+use libp2p::{core::ConnectedPoint, identity, PeerId};
 use log::debug;
 // use log::LevelFilter;
 // use simple_logging;
@@ -139,8 +139,20 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 num_established: _,
                 concurrent_dial_errors: _,
             } => {
-                self.ui
-                    .log_info(&format!("Connected to {} at {:?}", peer_id, endpoint));
+                let address = match endpoint.clone() {
+                    ConnectedPoint::Dialer {
+                        address,
+                        role_override: _,
+                    } => address,
+                    ConnectedPoint::Listener {
+                        local_addr: _,
+                        send_back_addr,
+                    } => send_back_addr,
+                };
+                if self.ui.connecting_to(&address) {
+                    self.ui
+                        .log_info(&format!("Connected to {} at {:?}", peer_id, endpoint,));
+                }
                 None
             }
             EngineEvent::ConnectionClosed {
@@ -149,20 +161,38 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 num_established: _,
                 cause,
             } => {
-                self.ui.log_info(&format!(
-                    "Connection closed to {} at {:?}: {:?}",
-                    peer_id, endpoint, cause
-                ));
+                let address = match endpoint.clone() {
+                    ConnectedPoint::Dialer {
+                        address,
+                        role_override: _,
+                    } => address,
+                    ConnectedPoint::Listener {
+                        local_addr: _,
+                        send_back_addr,
+                    } => send_back_addr,
+                };
+                if self.ui.connecting_to(&address) {
+                    self.ui.log_info(&format!(
+                        "Connection closed to {} at {:?}: {:?}",
+                        peer_id, endpoint, cause
+                    ));
+                }
+                self.ui.disconnected_from(&address);
                 None
             }
             EngineEvent::IncomingConnection {
                 local_addr,
                 send_back_addr,
             } => {
-                self.ui.log_info(&format!(
-                    "Incoming connection to {} from {}",
-                    local_addr, send_back_addr,
-                ));
+                if send_back_addr.is_empty() {
+                    self.ui
+                        .log_info(&format!("Incoming connection to {}", local_addr,));
+                } else {
+                    self.ui.log_info(&format!(
+                        "Incoming connection to {} from {}",
+                        local_addr, send_back_addr,
+                    ));
+                }
                 None
             }
             EngineEvent::NewListenAddr {
@@ -175,8 +205,8 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 ));
                 None
             }
-            EngineEvent::Dialing(peer_id) => {
-                self.ui.log_info(&format!("Dialing {}", peer_id,));
+            EngineEvent::Dialing(_peer_id) => {
+                // self.ui.log_info(&format!("Dialing {}", peer_id,));
                 None
             }
             EngineEvent::MdnsDiscovered(peers) => {
@@ -191,20 +221,17 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 None
             }
             EngineEvent::GossipSubscribed { peer_id, topic } => {
-                self.ui
-                    .log_info(&format!("Peer {} subscribed to {}", peer_id, topic));
+                if self.ui.subscribed(topic.as_str()) {
+                    self.ui
+                        .log_info(&format!("Peer {} subscribed to {}", peer_id, topic));
+                }
                 None
             }
             EngineEvent::GossipUnsubscribed { peer_id, topic } => {
-                self.ui
-                    .log_info(&format!("Peer {} unsubscribed to {}", peer_id, topic));
-                None
-            }
-            EngineEvent::IdentifyReceived { peer_id, info } => {
-                self.ui.log_info(&format!(
-                    "Identify received from peer {} with info {:?}",
-                    peer_id, info
-                ));
+                if self.ui.subscribed(topic.as_str()) {
+                    self.ui
+                        .log_info(&format!("Peer {} unsubscribed to {}", peer_id, topic));
+                }
                 None
             }
             _ => None,

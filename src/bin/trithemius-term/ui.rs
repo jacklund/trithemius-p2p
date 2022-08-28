@@ -5,7 +5,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use libp2p::gossipsub::IdentTopic;
-use libp2p::{core::transport::ListenerId, PeerId};
+use libp2p::{core::transport::ListenerId, Multiaddr, PeerId};
 use log::debug;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -125,6 +125,10 @@ impl SubscriptionList {
         }
     }
 
+    fn contains(&self, topic: &str) -> bool {
+        self.list.contains(&topic.to_string())
+    }
+
     fn names(&self) -> &Vec<String> {
         &self.list
     }
@@ -203,6 +207,7 @@ pub struct UI {
     log_messages: CircularQueue<LogMessage>,
     subscriptions: Subscriptions,
     subscription_list: SubscriptionList,
+    connect_list: Vec<Multiaddr>,
     scroll_messages_view: usize,
     input: Vec<char>,
     input_cursor: usize,
@@ -222,6 +227,7 @@ impl UI {
             log_messages: CircularQueue::with_capacity(200),
             subscriptions: Subscriptions::default(),
             subscription_list: SubscriptionList::new(),
+            connect_list: Vec::new(),
             scroll_messages_view: 0,
             input: Vec::new(),
             input_cursor: 0,
@@ -263,6 +269,10 @@ impl UI {
         }
 
         (position.0 as u16, position.1 as u16)
+    }
+
+    pub fn subscribed(&self, topic_name: &str) -> bool {
+        self.subscription_list.contains(topic_name)
     }
 
     pub fn subscribe(&mut self, engine: &mut Engine, topic_name: &str) {
@@ -321,7 +331,8 @@ impl UI {
         match address.parse::<NetworkAddress>() {
             Ok(network_addr) => {
                 self.log_info(&format!("Connecting to {}", network_addr));
-                engine.dial(network_addr.into())?;
+                engine.dial(network_addr.clone().into())?;
+                self.connect_list.push(network_addr.into());
             }
             Err(error) => {
                 self.log_error(&format!("Error parsing network address: {}", error));
@@ -329,6 +340,19 @@ impl UI {
             }
         };
         Ok(())
+    }
+
+    pub fn connecting_to(&self, address: &Multiaddr) -> bool {
+        self.connect_list.contains(address)
+    }
+
+    pub fn disconnected_from(&mut self, address: &Multiaddr) {
+        match self.connect_list.iter().position(|a| a == address) {
+            Some(index) => {
+                self.connect_list.swap_remove(index);
+            }
+            None => (),
+        };
     }
 
     pub async fn create_onion_service(

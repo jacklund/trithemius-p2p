@@ -133,6 +133,34 @@ impl TorDnsTransport {
                     }
                 }
             },
+            Poll::Ready(TransportEvent::Incoming {
+                listener_id,
+                upgrade,
+                local_addr,
+                ref send_back_addr,
+            }) => loop {
+                let mut address = local_addr.clone();
+                if let Some(Protocol::Tcp(port)) = address.pop() {
+                    match self.tor_map.get(&port) {
+                        Some(tor_addr) => {
+                            return Poll::Ready(TransportEvent::Incoming {
+                                listener_id,
+                                upgrade,
+                                local_addr: tor_addr.clone(),
+                                send_back_addr: Multiaddr::empty(),
+                            });
+                        }
+                        None => {
+                            return Poll::Ready(TransportEvent::Incoming {
+                                listener_id,
+                                upgrade,
+                                local_addr,
+                                send_back_addr: send_back_addr.clone(),
+                            });
+                        }
+                    }
+                }
+            },
             _ => event,
         }
     }

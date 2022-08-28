@@ -27,6 +27,7 @@ use libp2p::{
     kad::{record::store::MemoryStore, Kademlia},
     mplex, noise,
     ping::{Ping, PingConfig},
+    swarm::behaviour::toggle::Toggle,
     swarm::{DialError, NetworkBehaviour, Swarm, SwarmBuilder},
     Multiaddr, NetworkBehaviour, PeerId, Transport, TransportError,
 };
@@ -50,7 +51,7 @@ pub struct EngineBehaviour {
     ping: Ping,
     autonat: Autonat,
     dcutr: Dcutr,
-    kademlia: Kademlia<MemoryStore>,
+    kademlia: Toggle<Kademlia<MemoryStore>>,
     identify: Identify,
 }
 
@@ -156,7 +157,7 @@ impl Engine {
             ping: Ping::new(PingConfig::new().with_keep_alive(true)),
             autonat: Autonat::new(peer_id, AutonatConfig::default()), // TODO: Make this config
             dcutr: Dcutr::new(),
-            kademlia,
+            kademlia: Toggle::from(Some(kademlia)),
             identify: Identify::new(IdentifyConfig::new("ipfs/1.0.0".to_string(), key.public())),
         };
 
