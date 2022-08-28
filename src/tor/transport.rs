@@ -50,7 +50,7 @@ pub struct TorDnsTransport {
     tor: Arc<Mutex<TokioTcpTransport>>,
     proxy_addr: SocketAddr,
     poll_next: PollNext,
-    tor_map: HashMap<u16, Multiaddr>,
+    tor_map: HashMap<Multiaddr, Multiaddr>,
 }
 
 impl TorDnsTransport {
@@ -100,37 +100,29 @@ impl TorDnsTransport {
             Poll::Ready(TransportEvent::NewAddress {
                 listener_id,
                 ref mut listen_addr,
-            }) => loop {
-                if let Some(Protocol::Tcp(port)) = listen_addr.pop() {
-                    match self.tor_map.get(&port) {
-                        Some(tor_addr) => {
-                            return Poll::Ready(TransportEvent::NewAddress {
-                                listener_id,
-                                listen_addr: tor_addr.clone(),
-                            });
-                        }
-                        None => {
-                            return event;
-                        }
-                    }
+            }) => match self.tor_map.get(&listen_addr) {
+                Some(tor_addr) => {
+                    return Poll::Ready(TransportEvent::NewAddress {
+                        listener_id,
+                        listen_addr: tor_addr.clone(),
+                    });
+                }
+                None => {
+                    return event;
                 }
             },
             Poll::Ready(TransportEvent::AddressExpired {
                 listener_id,
                 ref mut listen_addr,
-            }) => loop {
-                if let Some(Protocol::Tcp(port)) = listen_addr.pop() {
-                    match self.tor_map.get(&port) {
-                        Some(tor_addr) => {
-                            return Poll::Ready(TransportEvent::AddressExpired {
-                                listener_id,
-                                listen_addr: tor_addr.clone(),
-                            });
-                        }
-                        None => {
-                            return event;
-                        }
-                    }
+            }) => match self.tor_map.get(&listen_addr) {
+                Some(tor_addr) => {
+                    return Poll::Ready(TransportEvent::AddressExpired {
+                        listener_id,
+                        listen_addr: tor_addr.clone(),
+                    });
+                }
+                None => {
+                    return event;
                 }
             },
             Poll::Ready(TransportEvent::Incoming {
@@ -138,29 +130,27 @@ impl TorDnsTransport {
                 upgrade,
                 local_addr,
                 ref send_back_addr,
-            }) => loop {
-                let mut address = local_addr.clone();
-                if let Some(Protocol::Tcp(port)) = address.pop() {
-                    match self.tor_map.get(&port) {
-                        Some(tor_addr) => {
-                            return Poll::Ready(TransportEvent::Incoming {
-                                listener_id,
-                                upgrade,
-                                local_addr: tor_addr.clone(),
-                                send_back_addr: Multiaddr::empty(),
-                            });
-                        }
-                        None => {
-                            return Poll::Ready(TransportEvent::Incoming {
-                                listener_id,
-                                upgrade,
-                                local_addr,
-                                send_back_addr: send_back_addr.clone(),
-                            });
-                        }
+            }) => {
+                let address = local_addr.clone();
+                match self.tor_map.get(&address) {
+                    Some(tor_addr) => {
+                        return Poll::Ready(TransportEvent::Incoming {
+                            listener_id,
+                            upgrade,
+                            local_addr: tor_addr.clone(),
+                            send_back_addr: Multiaddr::empty(),
+                        });
+                    }
+                    None => {
+                        return Poll::Ready(TransportEvent::Incoming {
+                            listener_id,
+                            upgrade,
+                            local_addr,
+                            send_back_addr: send_back_addr.clone(),
+                        });
                     }
                 }
-            },
+            }
             _ => event,
         }
     }
@@ -195,16 +185,23 @@ impl Transport for TorDnsTransport {
         for protocol in address.iter() {
             match protocol {
                 Protocol::Onion3(addr) => {
-                    let mut tor_addr: Multiaddr = "/ip4/127.0.0.1".parse().unwrap();
-                    tor_addr.push(Protocol::Tcp(addr.port()));
-                    let result = self.tor.lock().listen_on(tor_addr).map_err(|e| match e {
-                        TransportError::Other(std_error) => TransportError::Other(std_error.into()),
-                        TransportError::MultiaddrNotSupported(addr) => {
-                            TransportError::MultiaddrNotSupported(addr)
-                        }
-                    });
+                    let tor_addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", addr.port())
+                        .parse()
+                        .unwrap();
+                    let result = self
+                        .tor
+                        .lock()
+                        .listen_on(tor_addr.clone())
+                        .map_err(|e| match e {
+                            TransportError::Other(std_error) => {
+                                TransportError::Other(std_error.into())
+                            }
+                            TransportError::MultiaddrNotSupported(addr) => {
+                                TransportError::MultiaddrNotSupported(addr)
+                            }
+                        });
                     if result.is_ok() {
-                        self.tor_map.insert(addr.port(), address);
+                        self.tor_map.insert(tor_addr, address);
                     };
                     return result;
                 }
