@@ -26,15 +26,20 @@ type HandlerError = EitherError<
     EitherError<
         EitherError<
             EitherError<
-                EitherError<GossipsubHandlerError, Failure>,
-                ConnectionHandlerUpgrErr<std::io::Error>,
+                EitherError<
+                    EitherError<GossipsubHandlerError, Failure>,
+                    ConnectionHandlerUpgrErr<std::io::Error>,
+                >,
+                either::Either<
+                    ConnectionHandlerUpgrErr<
+                        EitherError<InboundUpgradeError, OutboundUpgradeError>,
+                    >,
+                    either::Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
+                >,
             >,
-            either::Either<
-                ConnectionHandlerUpgrErr<EitherError<InboundUpgradeError, OutboundUpgradeError>>,
-                either::Either<ConnectionHandlerUpgrErr<std::io::Error>, void::Void>,
-            >,
+            std::io::Error,
         >,
-        std::io::Error,
+        void::Void,
     >,
     std::io::Error,
 >;

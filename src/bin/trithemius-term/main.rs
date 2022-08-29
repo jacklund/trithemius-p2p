@@ -1,18 +1,21 @@
 use crate::ui::{Renderer, UI};
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
-use libp2p::{core::ConnectedPoint, identity, PeerId};
+use libp2p::{
+    autonat::Config as AutonatConfig, core::ConnectedPoint, identity, kad::KademliaConfig,
+    mdns::MdnsConfig, PeerId,
+};
 use log::debug;
 // use log::LevelFilter;
 // use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
-    create_transport, engine_event::EngineEvent, ChatMessage, Engine, EngineBehaviour, Handler,
-    InputEvent,
+    engine_event::EngineEvent, ChatMessage, Engine, EngineBehaviour, EngineConfig, Handler,
+    InputEvent, KademliaType,
 };
 
 pub mod ui;
@@ -80,18 +83,8 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
             self.ui.subscribe(engine, topic);
         }
 
-        if let Some(topic) = &self.cli.unsubscribe {
-            self.ui.unsubscribe(engine, topic);
-        }
-
-        if let Some(ports) = &self.cli.create_onion_service {
-            if ports.len() == 2 {
-                self.ui
-                    .create_onion_service(engine, &ports[0], Some(&ports[1]))
-                    .await;
-            } else {
-                self.ui.create_onion_service(engine, &ports[0], None).await;
-            }
+        if let Some(port) = &self.cli.create_onion_service {
+            self.ui.create_onion_service(engine, &port, None).await;
         }
 
         Ok(())
@@ -248,14 +241,31 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     }
 }
 
-#[derive(Parser)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum Discovery {
+    Kademlia,
+    Mdns,
+    Rendezvous,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum NatTraversal {
+    Autonat,
+    CircuitRelay,
+    Dcutr,
+}
+
+#[derive(Clone, Parser)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
-    #[clap(long, value_parser, value_name = "TOPIC")]
-    subscribe: Option<String>,
+    #[clap(long, value_parser, multiple_values = true, use_value_delimiter = true)]
+    discovery: Option<Vec<Discovery>>,
+
+    #[clap(long, value_parser, multiple_values = true, use_value_delimiter = true)]
+    nat_traversal: Option<Vec<NatTraversal>>,
 
     #[clap(long, value_parser, value_name = "TOPIC")]
-    unsubscribe: Option<String>,
+    subscribe: Option<String>,
 
     #[clap(long, value_parser, value_name = "ADDRESS")]
     listen: Option<String>,
@@ -263,8 +273,36 @@ pub struct Cli {
     #[clap(long, value_parser, value_name = "ADDRESS")]
     connect: Option<String>,
 
-    #[clap(long, max_values(2), value_name = "ADDRESS")]
-    create_onion_service: Option<Vec<String>>,
+    #[clap(long, value_name = "ADDRESS")]
+    create_onion_service: Option<String>,
+}
+
+impl From<Cli> for EngineConfig {
+    fn from(cli: Cli) -> EngineConfig {
+        let mut config = EngineConfig::default();
+        if cli.discovery.is_some() {
+            for discovery_type in cli.discovery.unwrap() {
+                match discovery_type {
+                    Discovery::Kademlia => {
+                        config.kademlia_type = Some(KademliaType::Ip2p);
+                        config.kademlia_config = KademliaConfig::default();
+                    }
+                    Discovery::Mdns => config.mdns_config = Some(MdnsConfig::default()),
+                    Discovery::Rendezvous => config.use_rendezvous = true,
+                }
+            }
+        }
+        if cli.nat_traversal.is_some() {
+            for nat_traversal in cli.nat_traversal.unwrap() {
+                match nat_traversal {
+                    NatTraversal::Autonat => config.autonat_config = Some(AutonatConfig::default()),
+                    NatTraversal::CircuitRelay => config.use_circuit_relay = true,
+                    NatTraversal::Dcutr => config.use_dcutr = true,
+                }
+            }
+        }
+        config
+    }
 }
 
 /// The `tokio::main` attribute sets up a tokio runtime.
@@ -275,21 +313,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    // Create a random PeerId
-    let id_keys = identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(id_keys.public());
-    debug!("Local peer id: {:?}", peer_id);
+    // Create a random Keypair
+    let keypair = identity::Keypair::generate_ed25519();
 
-    let transport = create_transport(&id_keys)?;
-    debug!("Transport: {:?}", transport);
+    // Create an engine to manage peers and events.
+    let engine_config: EngineConfig = cli.clone().into();
+    let mut engine = Engine::new(keypair, engine_config).await?;
 
-    // Create a Swarm to manage peers and events.
-    let mut engine = Engine::new(id_keys, transport, peer_id)?;
-
-    let mut handler = MyHandler::new(peer_id, cli);
+    let mut handler = MyHandler::new(engine.peer_id(), cli);
     handler
         .ui
-        .log_info(&format!("Local peer id: {:?}", peer_id));
+        .log_info(&format!("Local peer id: {:?}", engine.peer_id()));
 
     engine.run(TermInputStream::new(), handler).await
 }

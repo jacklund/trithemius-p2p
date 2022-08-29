@@ -14,17 +14,18 @@ use chrono::{DateTime, Local};
 use engine_event::EngineEvent;
 use futures::stream::FusedStream;
 use libp2p::{
-    autonat::{Behaviour as Autonat, Config as AutonatConfig},
+    autonat::{self, Behaviour as Autonat, Config as AutonatConfig},
     core::{muxing::StreamMuxerBox, transport::Boxed, transport::ListenerId, upgrade},
     futures::StreamExt,
     gossipsub::{
         error::{PublishError, SubscriptionError},
-        Gossipsub, GossipsubConfigBuilder, IdentTopic, MessageAuthenticity, MessageId,
-        ValidationMode,
+        Gossipsub, GossipsubConfig, GossipsubConfigBuilder, IdentTopic, MessageAuthenticity,
+        MessageId, ValidationMode,
     },
     identify::{Identify, IdentifyConfig},
     identity,
-    kad::{record::store::MemoryStore, Kademlia},
+    kad::{record::store::MemoryStore, Kademlia, KademliaConfig},
+    mdns::{Mdns, MdnsConfig},
     mplex, noise,
     ping::{Ping, PingConfig},
     swarm::behaviour::toggle::Toggle,
@@ -49,9 +50,10 @@ const KAD_BOOTNODES: [&str; 4] = [
 pub struct EngineBehaviour {
     pub_sub: Gossipsub,
     ping: Ping,
-    autonat: Autonat,
-    dcutr: Dcutr,
+    autonat: Toggle<Autonat>,
+    dcutr: Toggle<Dcutr>,
     kademlia: Toggle<Kademlia<MemoryStore>>,
+    mdns: Toggle<Mdns>,
     identify: Identify,
 }
 
@@ -81,11 +83,11 @@ impl ChatMessage {
 }
 
 pub fn create_transport(
-    id_keys: &identity::Keypair,
+    keypair: &identity::Keypair,
 ) -> Result<Boxed<(PeerId, StreamMuxerBox)>, Box<dyn std::error::Error>> {
     // Create a keypair for authenticated encryption of the transport.
     let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
-        .into_authentic(id_keys)
+        .into_authentic(keypair)
         .expect("Signing libp2p-noise static DH keypair failed.");
 
     // We wrap the base libp2p tokio TCP transport inside the tokio DNS transport, inside our Tor
@@ -129,36 +131,76 @@ pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
 pub struct Engine {
     swarm: Swarm<EngineBehaviour>,
     tor_connection: Option<TorControlConnection>,
+    peer_id: PeerId,
+}
+
+#[derive(Clone, Debug)]
+pub enum KademliaType {
+    Ip2p,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EngineConfig {
+    pub gossipsub_config: GossipsubConfig,
+    pub autonat_config: Option<autonat::Config>,
+    pub use_circuit_relay: bool,
+    pub use_dcutr: bool,
+    pub kademlia_type: Option<KademliaType>,
+    pub kademlia_config: KademliaConfig,
+    pub mdns_config: Option<MdnsConfig>,
+    pub use_rendezvous: bool,
 }
 
 impl Engine {
-    pub fn new(
-        key: identity::Keypair,
-        transport: Boxed<(PeerId, StreamMuxerBox)>,
-        peer_id: PeerId,
+    pub async fn new(
+        keypair: identity::Keypair,
+        config: EngineConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Set a custom gossipsub
-        let gossipsub_config = GossipsubConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
-            .validation_mode(ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
-            .build()
-            .expect("Valid config");
+        let peer_id = PeerId::from(keypair.public());
+        let transport = create_transport(&keypair)?;
 
-        let mut kademlia = Kademlia::new(peer_id, MemoryStore::new(peer_id));
-        let bootaddr: Multiaddr = "/dnsaddr/bootstrap.libp2p.io".parse().unwrap();
-        for peer in &KAD_BOOTNODES {
-            kademlia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
-        }
-        kademlia.bootstrap()?;
+        let autonat = match config.autonat_config {
+            Some(config) => Some(Autonat::new(peer_id, config)),
+            None => None,
+        };
+
+        let dcutr = match config.use_dcutr {
+            true => Some(Dcutr::new()),
+            false => None,
+        };
+
+        let kademlia = if config.kademlia_type.is_some() {
+            let mut kademlia = Kademlia::new(peer_id, MemoryStore::new(peer_id));
+            let bootaddr: Multiaddr = "/dnsaddr/bootstrap.libp2p.io".parse().unwrap();
+            for peer in &KAD_BOOTNODES {
+                kademlia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
+            }
+            kademlia.bootstrap()?;
+            Some(kademlia)
+        } else {
+            None
+        };
+
+        let mdns = match config.mdns_config {
+            Some(config) => Some(Mdns::new(config).await?),
+            None => None,
+        };
 
         let behaviour = EngineBehaviour {
-            pub_sub: Gossipsub::new(MessageAuthenticity::Signed(key.clone()), gossipsub_config)
-                .expect("Correct configuration"),
+            pub_sub: Gossipsub::new(
+                MessageAuthenticity::Signed(keypair.clone()),
+                config.gossipsub_config,
+            )
+            .expect("Correct configuration"),
             ping: Ping::new(PingConfig::new().with_keep_alive(true)),
-            autonat: Autonat::new(peer_id, AutonatConfig::default()), // TODO: Make this config
-            dcutr: Dcutr::new(),
-            kademlia: Toggle::from(Some(kademlia)),
-            identify: Identify::new(IdentifyConfig::new("ipfs/1.0.0".to_string(), key.public())),
+            autonat: Toggle::from(autonat),
+            dcutr: Toggle::from(dcutr),
+            kademlia: Toggle::from(kademlia),
+            mdns: Toggle::from(mdns),
+            identify: Identify::new(IdentifyConfig::new(
+                "ipfs/id/1.0.0".to_string(),
+                keypair.public(),
+            )),
         };
 
         let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
@@ -172,7 +214,12 @@ impl Engine {
         Ok(Engine {
             swarm,
             tor_connection: None,
+            peer_id,
         })
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        self.peer_id
     }
 
     async fn get_tor_connection(&mut self) -> Result<&mut TorControlConnection, TorError> {
