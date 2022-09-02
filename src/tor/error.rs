@@ -1,7 +1,7 @@
 use tokio::sync::oneshot;
 use tokio_util::codec::LinesCodecError;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TorError {
     AuthenticationError(String),
     ProtocolError(String),

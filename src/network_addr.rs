@@ -5,7 +5,7 @@ use libp2p::{
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkAddress {
     addr: Multiaddr,
 }

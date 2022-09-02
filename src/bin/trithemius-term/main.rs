@@ -84,7 +84,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
         }
 
         if let Some(port) = &self.cli.create_onion_service {
-            self.ui.create_onion_service(engine, &port, None).await;
+            self.ui.create_onion_service(engine, port, None).await;
         }
 
         Ok(())

@@ -100,30 +100,22 @@ impl TorDnsTransport {
             Poll::Ready(TransportEvent::NewAddress {
                 listener_id,
                 ref mut listen_addr,
-            }) => match self.tor_map.get(&listen_addr) {
-                Some(tor_addr) => {
-                    return Poll::Ready(TransportEvent::NewAddress {
-                        listener_id,
-                        listen_addr: tor_addr.clone(),
-                    });
-                }
-                None => {
-                    return event;
-                }
+            }) => match self.tor_map.get(listen_addr) {
+                Some(tor_addr) => Poll::Ready(TransportEvent::NewAddress {
+                    listener_id,
+                    listen_addr: tor_addr.clone(),
+                }),
+                None => event,
             },
             Poll::Ready(TransportEvent::AddressExpired {
                 listener_id,
                 ref mut listen_addr,
-            }) => match self.tor_map.get(&listen_addr) {
-                Some(tor_addr) => {
-                    return Poll::Ready(TransportEvent::AddressExpired {
-                        listener_id,
-                        listen_addr: tor_addr.clone(),
-                    });
-                }
-                None => {
-                    return event;
-                }
+            }) => match self.tor_map.get(listen_addr) {
+                Some(tor_addr) => Poll::Ready(TransportEvent::AddressExpired {
+                    listener_id,
+                    listen_addr: tor_addr.clone(),
+                }),
+                None => event,
             },
             Poll::Ready(TransportEvent::Incoming {
                 listener_id,
@@ -133,22 +125,18 @@ impl TorDnsTransport {
             }) => {
                 let address = local_addr.clone();
                 match self.tor_map.get(&address) {
-                    Some(tor_addr) => {
-                        return Poll::Ready(TransportEvent::Incoming {
-                            listener_id,
-                            upgrade,
-                            local_addr: tor_addr.clone(),
-                            send_back_addr: Multiaddr::empty(),
-                        });
-                    }
-                    None => {
-                        return Poll::Ready(TransportEvent::Incoming {
-                            listener_id,
-                            upgrade,
-                            local_addr,
-                            send_back_addr: send_back_addr.clone(),
-                        });
-                    }
+                    Some(tor_addr) => Poll::Ready(TransportEvent::Incoming {
+                        listener_id,
+                        upgrade,
+                        local_addr: tor_addr.clone(),
+                        send_back_addr: Multiaddr::empty(),
+                    }),
+                    None => Poll::Ready(TransportEvent::Incoming {
+                        listener_id,
+                        upgrade,
+                        local_addr,
+                        send_back_addr: send_back_addr.clone(),
+                    }),
                 }
             }
             _ => event,

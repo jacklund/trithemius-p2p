@@ -161,10 +161,9 @@ impl Engine {
         let peer_id = PeerId::from(keypair.public());
         let transport = create_transport(&keypair)?;
 
-        let autonat = match config.autonat_config {
-            Some(config) => Some(Autonat::new(peer_id, config)),
-            None => None,
-        };
+        let autonat = config
+            .autonat_config
+            .map(|config| Autonat::new(peer_id, config));
 
         let dcutr = match config.use_dcutr {
             true => Some(Dcutr::new()),
@@ -377,11 +376,8 @@ impl Engine {
                 }
             }
 
-            loop {
-                match self.event_queue.pop_front() {
-                    Some(event) => handler.handle_event(self, event).await?,
-                    None => break,
-                };
+            while let Some(event) = self.event_queue.pop_front() {
+                handler.handle_event(self, event).await?;
             }
         }
     }
