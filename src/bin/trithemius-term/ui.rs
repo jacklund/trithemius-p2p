@@ -728,7 +728,7 @@ impl UI {
                     .constraints(
                         [
                             Constraint::Length(1),
-                            Constraint::Length(20),
+                            Constraint::Percentage(20),
                             Constraint::Length(3),
                             Constraint::Min(1),
                             Constraint::Length(1),
