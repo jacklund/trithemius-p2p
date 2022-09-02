@@ -60,6 +60,12 @@ pub enum EngineEvent {
         sequence_number: Option<u64>,
         message: String,
     },
+    PeerAddresses {
+        peer: PeerId,
+        addresses: Vec<Multiaddr>,
+    },
+
+    // SwarmEvents
     ConnectionEstablished {
         peer_id: PeerId,
         endpoint: ConnectedPoint,

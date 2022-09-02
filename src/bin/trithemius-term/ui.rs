@@ -7,6 +7,7 @@ use crossterm::ExecutableCommand;
 use libp2p::gossipsub::IdentTopic;
 use libp2p::{core::transport::ListenerId, Multiaddr, PeerId};
 use log::debug;
+use std::str::FromStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use trithemiuslib::{
@@ -342,6 +343,24 @@ impl UI {
         Ok(())
     }
 
+    pub async fn find_peer(
+        &mut self,
+        engine: &mut Engine,
+        peer_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match PeerId::from_str(peer_id) {
+            Ok(peer) => {
+                self.log_info(&format!("Finding peer {}", peer));
+                engine.find_peer(&peer).await;
+            }
+            Err(error) => {
+                self.log_error(&format!("Error parsing PeerId: {}", error));
+                Err(error)?
+            }
+        };
+        Ok(())
+    }
+
     pub fn connecting_to(&self, address: &Multiaddr) -> bool {
         self.connect_list.contains(address)
     }
@@ -459,6 +478,16 @@ impl UI {
                         }
                     };
 
+                    Ok(None)
+                }
+                "findpeer" => {
+                    debug!("Got findpeer command");
+                    match command_args.pop_front() {
+                        Some(peer_id) => self.find_peer(engine, peer_id).await?,
+                        None => {
+                            self.log_error("'findpeer' command requires Peer ID to find");
+                        }
+                    }
                     Ok(None)
                 }
                 "quit" => Ok(Some(InputEvent::Shutdown)),

@@ -14,17 +14,16 @@ use chrono::{DateTime, Local};
 use engine_event::EngineEvent;
 use futures::stream::FusedStream;
 use libp2p::{
-    autonat::{self, Behaviour as Autonat, Config as AutonatConfig},
+    autonat::{self, Behaviour as Autonat},
     core::{muxing::StreamMuxerBox, transport::Boxed, transport::ListenerId, upgrade},
     futures::StreamExt,
     gossipsub::{
         error::{PublishError, SubscriptionError},
-        Gossipsub, GossipsubConfig, GossipsubConfigBuilder, IdentTopic, MessageAuthenticity,
-        MessageId, ValidationMode,
+        Gossipsub, GossipsubConfig, IdentTopic, MessageAuthenticity, MessageId,
     },
     identify::{Identify, IdentifyConfig},
     identity,
-    kad::{record::store::MemoryStore, Kademlia, KademliaConfig},
+    kad::{record::store::MemoryStore, Kademlia, KademliaConfig, QueryId},
     mdns::{Mdns, MdnsConfig},
     mplex, noise,
     ping::{Ping, PingConfig},
@@ -34,9 +33,9 @@ use libp2p::{
 };
 use libp2p_dcutr::behaviour::Behaviour as Dcutr;
 use log::debug;
+use std::collections::{HashMap, VecDeque};
 use std::net::ToSocketAddrs;
 use std::str::FromStr;
-use std::time::Duration;
 
 const KAD_BOOTNODES: [&str; 4] = [
     "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -132,6 +131,9 @@ pub struct Engine {
     swarm: Swarm<EngineBehaviour>,
     tor_connection: Option<TorControlConnection>,
     peer_id: PeerId,
+    has_kademlia: bool,
+    query_map: HashMap<QueryId, PeerId>,
+    event_queue: VecDeque<EngineEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +171,7 @@ impl Engine {
             false => None,
         };
 
+        let mut has_kademlia = false;
         let kademlia = if config.kademlia_type.is_some() {
             let mut kademlia = Kademlia::new(peer_id, MemoryStore::new(peer_id));
             let bootaddr: Multiaddr = "/dnsaddr/bootstrap.libp2p.io".parse().unwrap();
@@ -176,6 +179,7 @@ impl Engine {
                 kademlia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
             }
             kademlia.bootstrap()?;
+            has_kademlia = true;
             Some(kademlia)
         } else {
             None
@@ -215,6 +219,9 @@ impl Engine {
             swarm,
             tor_connection: None,
             peer_id,
+            has_kademlia,
+            query_map: HashMap::new(),
+            event_queue: VecDeque::new(),
         })
     }
 
@@ -288,6 +295,33 @@ impl Engine {
         ret
     }
 
+    // This is kind of strange. If we're using Kademlia, we can't just ask
+    // for the peer address, we need to first run a query for it. See
+    // https://github.com/libp2p/rust-libp2p/issues/1568.
+    pub async fn find_peer(&mut self, peer: &PeerId) {
+        if self.has_kademlia {
+            let query_id = self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .as_mut()
+                .unwrap()
+                .get_closest_peers(*peer);
+
+            // Insert query id and peer id into map, to be looked up
+            // later when the query response comes in
+            self.query_map.insert(query_id, *peer);
+        } else {
+            let addresses = self.swarm.behaviour_mut().addresses_of_peer(peer);
+
+            // Inject the event "artificially" into the event handler
+            self.event_queue.push_back(EngineEvent::PeerAddresses {
+                peer: *peer,
+                addresses,
+            });
+        }
+    }
+
     pub fn swarm(&mut self) -> &mut Swarm<EngineBehaviour> {
         &mut self.swarm
     }
@@ -322,8 +356,32 @@ impl Engine {
                 },
                 event = self.swarm().select_next_some() => {
                     debug!("Got event {:?}", event);
-                    handler.handle_event(self, event.into()).await?;
+                    let engine_event = event.into();
+                    match engine_event {
+                        EngineEvent::KadOutboundQueryCompleted {
+                            id,
+                            result: _,
+                            stats: _,
+                        } => {
+                            if let Some(peer) = self.query_map.remove(&id) {
+                                let addresses = self.swarm().behaviour_mut().addresses_of_peer(&peer);
+                                handler.handle_event(self, EngineEvent::PeerAddresses {
+                                    peer,
+                                    addresses,
+                                }).await?;
+                            }
+                            handler.handle_event(self, engine_event).await?;
+                        }
+                        _ => { handler.handle_event(self, engine_event).await?; }
+                    }
                 }
+            }
+
+            loop {
+                match self.event_queue.pop_front() {
+                    Some(event) => handler.handle_event(self, event).await?,
+                    None => break,
+                };
             }
         }
     }

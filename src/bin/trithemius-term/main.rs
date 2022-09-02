@@ -126,6 +126,21 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                     .add_message(ChatMessage::new(source, topic.to_string(), message));
                 None
             }
+            EngineEvent::PeerAddresses { peer, addresses } => {
+                if addresses.is_empty() {
+                    self.ui
+                        .log_info(&format!("Found no addresses for PeerId {}", peer));
+                } else {
+                    self.ui.log_info(&format!(
+                        "Found the following addresses for PeerId {}:",
+                        peer
+                    ));
+                    for address in addresses {
+                        self.ui.log_info(&format!("   {}", address));
+                    }
+                }
+                None
+            }
             EngineEvent::ConnectionEstablished {
                 peer_id,
                 endpoint,
