@@ -126,6 +126,10 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                     .add_message(ChatMessage::new(source, topic.to_string(), message));
                 None
             }
+            EngineEvent::SystemMessage(message) => {
+                self.ui.log_info(&message);
+                None
+            }
             EngineEvent::PeerAddresses { peer, addresses } => {
                 if addresses.is_empty() {
                     self.ui

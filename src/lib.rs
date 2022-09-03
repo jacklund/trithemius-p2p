@@ -299,6 +299,11 @@ impl Engine {
     // https://github.com/libp2p/rust-libp2p/issues/1568.
     pub async fn find_peer(&mut self, peer: &PeerId) {
         if self.has_kademlia {
+            self.event_queue.push_back(
+                EngineEvent::SystemMessage(
+                    format!("Initiating finding peer {} with Kademlia, please be patient, this might take a minute", peer)
+                )
+            );
             let query_id = self
                 .swarm
                 .behaviour_mut()
@@ -357,6 +362,7 @@ impl Engine {
                     debug!("Got event {:?}", event);
                     let engine_event = event.into();
                     match engine_event {
+                        // Kademlia query has completed, we can check the peer addresses now
                         EngineEvent::KadOutboundQueryCompleted {
                             id,
                             result: _,

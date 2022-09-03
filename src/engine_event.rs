@@ -60,10 +60,12 @@ pub enum EngineEvent {
         sequence_number: Option<u64>,
         message: String,
     },
+    SystemMessage(String),
     PeerAddresses {
         peer: PeerId,
         addresses: Vec<Multiaddr>,
     },
+    Shutdown,
 
     // SwarmEvents
     ConnectionEstablished {
@@ -202,8 +204,6 @@ pub enum EngineEvent {
         peer: PeerId,
         address: Multiaddr,
     },
-
-    Shutdown,
 }
 
 impl From<SwarmEvent<EngineEvent, HandlerError>> for EngineEvent {
