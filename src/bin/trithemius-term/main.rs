@@ -1,22 +1,22 @@
 use crate::ui::{Renderer, UI};
 use async_trait::async_trait;
-use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
+use clap::Parser;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
 use libp2p::{
     autonat::Config as AutonatConfig, core::ConnectedPoint, identity, kad::KademliaConfig,
-    mdns::MdnsConfig, rendezvous::Namespace, PeerId,
+    mdns::MdnsConfig, PeerId,
 };
 use log::debug;
-use std::str::FromStr;
 // use log::LevelFilter;
 // use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
-    engine_event::EngineEvent, ChatMessage, Engine, EngineBehaviour, EngineConfig, Handler,
-    InputEvent, KademliaType,
+    cli::{Discovery, NamespaceAndNodeId, NatTraversal},
+    engine_event::EngineEvent,
+    ChatMessage, Engine, EngineBehaviour, EngineConfig, Handler, InputEvent, KademliaType,
 };
 
 pub mod ui;
@@ -325,83 +325,6 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     async fn update(&mut self) -> Result<(), std::io::Error> {
         // debug!("Called handler::update()");
         self.renderer.render(&self.ui)
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum Discovery {
-    Kademlia,
-    Mdns,
-    Rendezvous,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum NatTraversal {
-    Autonat,
-    CircuitRelay,
-    Dcutr,
-}
-
-#[derive(Clone, Debug)]
-pub struct NamespaceAndNodeId {
-    namespace: Namespace,
-    node_id: PeerId,
-}
-
-impl clap::builder::ValueParserFactory for NamespaceAndNodeId {
-    type Parser = NamespaceAndNodeIdParser;
-    fn value_parser() -> Self::Parser {
-        NamespaceAndNodeIdParser
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct NamespaceAndNodeIdParser;
-
-impl clap::builder::TypedValueParser for NamespaceAndNodeIdParser {
-    type Value = NamespaceAndNodeId;
-
-    fn parse_ref(
-        &self,
-        _cmd: &clap::Command,
-        _arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<Self::Value, clap::Error> {
-        let mut cmd = Cli::command();
-        match value.to_str() {
-            Some(value_str) => {
-                if value_str.contains('/') {
-                    let values = value_str.split_once('/').unwrap();
-                    let namespace = match Namespace::new(values.0.to_string()) {
-                        Ok(namespace) => namespace,
-                        Err(_) => {
-                            return Err(
-                                cmd.error(ErrorKind::ValueValidation, "Namespace is too long")
-                            )
-                        }
-                    };
-                    let node_id = match PeerId::from_str(values.1) {
-                        Ok(node_id) => node_id,
-                        Err(error) => {
-                            return Err(cmd.error(
-                                ErrorKind::ValueValidation,
-                                format!("Error parsing peer ID: {}", error),
-                            ))
-                        }
-                    };
-                    Ok(Self::Value { namespace, node_id })
-                } else {
-                    Err(cmd.error(
-                        ErrorKind::ValueValidation,
-                        "Namespace and NodeId should be specified as 'NAMESPACE/NODE_ID'",
-                    ))
-                }
-            }
-            None => Err(cmd.error(
-                ErrorKind::ValueValidation,
-                "Namespace and NodeId aren't valid unicode",
-            )),
-        }
     }
 }
 

@@ -1,9 +1,11 @@
+pub mod cli;
 pub mod engine;
 pub mod engine_event;
 pub mod network_addr;
 pub mod subscriptions;
 pub mod tor;
 
+pub use crate::cli::{Discovery, NamespaceAndNodeId, NamespaceAndNodeIdParser, NatTraversal};
 pub use crate::engine::{Engine, EngineBehaviour, EngineConfig, InputEvent, KademliaType};
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
