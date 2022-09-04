@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate enum_display_derive;
+
 pub mod cli;
 pub mod engine;
 pub mod engine_event;

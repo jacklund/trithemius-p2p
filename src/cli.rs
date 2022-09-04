@@ -1,15 +1,16 @@
 use clap::{error::ErrorKind, ValueEnum};
 use libp2p::{rendezvous::Namespace, PeerId};
+use std::fmt::Display;
 use std::str::FromStr;
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Copy, Clone, Display, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum Discovery {
     Kademlia,
     Mdns,
     Rendezvous,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Copy, Clone, Display, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum NatTraversal {
     Autonat,
     CircuitRelay,

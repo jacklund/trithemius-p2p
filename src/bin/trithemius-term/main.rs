@@ -72,6 +72,11 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     type Event = TermEvent;
 
     async fn startup(&mut self, engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>> {
+        self.ui.startup(
+            &mut engine.discovery_types(),
+            &mut engine.nat_traversal_types(),
+        );
+
         if let Some(address) = &self.cli.listen {
             self.ui.listen(engine, address)?;
         }

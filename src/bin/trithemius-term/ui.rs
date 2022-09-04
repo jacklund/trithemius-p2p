@@ -12,6 +12,7 @@ use std::str::FromStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use trithemiuslib::{
+    cli::{Discovery, NatTraversal},
     network_addr::NetworkAddress,
     subscriptions::{SubscriptionError, Subscriptions},
     ChatMessage, Engine, InputEvent,
@@ -220,6 +221,8 @@ pub struct UI {
     date_color: Color,
     chat_panel_color: Color,
     input_panel_color: Color,
+    discovery_methods: String,
+    nat_traversal_methods: String,
 }
 
 impl UI {
@@ -240,7 +243,35 @@ impl UI {
             date_color: Color::DarkGray,
             chat_panel_color: Color::White,
             input_panel_color: Color::White,
+            discovery_methods: String::new(),
+            nat_traversal_methods: String::new(),
         }
+    }
+
+    pub fn startup(
+        &mut self,
+        discovery_methods: &mut Vec<Discovery>,
+        nat_traversal_methods: &mut Vec<NatTraversal>,
+    ) {
+        self.discovery_methods = if discovery_methods.is_empty() {
+            "None".to_string()
+        } else {
+            discovery_methods
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        };
+
+        self.nat_traversal_methods = if nat_traversal_methods.is_empty() {
+            "None".to_string()
+        } else {
+            nat_traversal_methods
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        };
     }
 
     pub fn scroll_messages_view(&self) -> usize {
@@ -855,10 +886,16 @@ impl UI {
     }
 
     fn draw_title_bar(&self, frame: &mut Frame<CrosstermBackend<impl Write>>, chunk: Rect) {
-        let title_bar = Paragraph::new(format!("{} {}", crate_name!(), crate_version!()))
-            .block(Block::default().borders(Borders::NONE))
-            .style(Style::default().bg(Color::Blue))
-            .alignment(Alignment::Left);
+        let title_bar = Paragraph::new(format!(
+            "{} {}  |  Discovery methods: {}  |  Nat traversal methods: {}",
+            crate_name!(),
+            crate_version!(),
+            self.discovery_methods,
+            self.nat_traversal_methods,
+        ))
+        .block(Block::default().borders(Borders::NONE))
+        .style(Style::default().bg(Color::Blue))
+        .alignment(Alignment::Left);
 
         frame.render_widget(title_bar, chunk);
     }

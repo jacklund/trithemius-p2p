@@ -1,3 +1,4 @@
+use crate::cli::{Discovery, NatTraversal};
 use crate::engine_event::EngineEvent;
 use crate::tor::{
     auth::TorAuthentication,
@@ -125,6 +126,8 @@ pub struct Engine {
     peer_id: PeerId,
     query_map: HashMap<QueryId, PeerId>,
     event_queue: VecDeque<EngineEvent>,
+    discovery_types: Vec<Discovery>,
+    nat_traversal_types: Vec<NatTraversal>,
 }
 
 impl Engine {
@@ -134,14 +137,23 @@ impl Engine {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let peer_id = PeerId::from(keypair.public());
         let transport = create_transport(&keypair)?;
+        let mut discovery = Vec::new();
+        let mut nat_traversal = Vec::new();
 
         // Set up the various sub-behaviours
-        let autonat = config
-            .autonat_config
-            .map(|config| Autonat::new(peer_id, config));
+        let autonat = match config.autonat_config {
+            Some(config) => {
+                nat_traversal.push(NatTraversal::Autonat);
+                Some(Autonat::new(peer_id, config))
+            }
+            None => None,
+        };
 
         let dcutr = match config.use_dcutr {
-            true => Some(Dcutr::new()),
+            true => {
+                nat_traversal.push(NatTraversal::Dcutr);
+                Some(Dcutr::new())
+            }
             false => None,
         };
 
@@ -152,18 +164,25 @@ impl Engine {
                 kademlia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
             }
             kademlia.bootstrap()?;
+            discovery.push(Discovery::Kademlia);
             Some(kademlia)
         } else {
             None
         };
 
         let mdns = match config.mdns_config {
-            Some(config) => Some(Mdns::new(config).await?),
+            Some(config) => {
+                discovery.push(Discovery::Mdns);
+                Some(Mdns::new(config).await?)
+            }
             None => None,
         };
 
         let rendezvous_client = match config.rendezvous_client {
-            true => Some(RendezvousClientBehaviour::new(keypair.clone())),
+            true => {
+                discovery.push(Discovery::Rendezvous);
+                Some(RendezvousClientBehaviour::new(keypair.clone()))
+            }
             false => None,
         };
 
@@ -209,11 +228,21 @@ impl Engine {
             peer_id,
             query_map: HashMap::new(),
             event_queue: VecDeque::new(),
+            discovery_types: discovery,
+            nat_traversal_types: nat_traversal,
         })
     }
 
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    pub fn discovery_types(&self) -> Vec<Discovery> {
+        self.discovery_types.clone()
+    }
+
+    pub fn nat_traversal_types(&self) -> Vec<NatTraversal> {
+        self.nat_traversal_types.clone()
     }
 
     async fn get_tor_connection(&mut self) -> Result<&mut TorControlConnection, TorError> {
