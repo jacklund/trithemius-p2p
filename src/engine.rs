@@ -244,7 +244,7 @@ impl Engine {
     }
 
     pub fn dial(&mut self, addr: Multiaddr) -> Result<(), DialError> {
-        self.swarm().dial(addr)
+        self.swarm.dial(addr)
     }
 
     pub fn listen(
@@ -342,10 +342,6 @@ impl Engine {
         }
     }
 
-    pub fn swarm(&mut self) -> &mut Swarm<EngineBehaviour> {
-        &mut self.swarm
-    }
-
     pub async fn run<F: FusedStream + std::marker::Unpin, H: Handler<EngineBehaviour, F>>(
         &mut self,
         mut input_stream: F,
@@ -374,7 +370,7 @@ impl Engine {
                         _ => { },
                     }
                 },
-                event = self.swarm().select_next_some() => {
+                event = self.swarm.select_next_some() => {
                     debug!("Got event {:?}", event);
                     let engine_event = event.into();
                     match engine_event {
@@ -393,7 +389,7 @@ impl Engine {
                             stats: _,
                         } => {
                             if let Some(peer) = self.query_map.remove(&id) {
-                                let addresses = self.swarm().behaviour_mut().addresses_of_peer(&peer);
+                                let addresses = self.swarm.behaviour_mut().addresses_of_peer(&peer);
                                 handler.handle_event(self, EngineEvent::PeerAddresses {
                                     peer,
                                     addresses,
