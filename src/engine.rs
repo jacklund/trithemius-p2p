@@ -123,7 +123,6 @@ pub struct Engine {
     swarm: Swarm<EngineBehaviour>,
     tor_connection: Option<TorControlConnection>,
     peer_id: PeerId,
-    has_kademlia: bool,
     query_map: HashMap<QueryId, PeerId>,
     event_queue: VecDeque<EngineEvent>,
 }
@@ -145,7 +144,6 @@ impl Engine {
             false => None,
         };
 
-        let mut has_kademlia = false;
         let kademlia = if config.kademlia_type.is_some() {
             let mut kademlia = Kademlia::new(peer_id, MemoryStore::new(peer_id));
             let bootaddr: Multiaddr = "/dnsaddr/bootstrap.libp2p.io".parse().unwrap();
@@ -153,7 +151,6 @@ impl Engine {
                 kademlia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
             }
             kademlia.bootstrap()?;
-            has_kademlia = true;
             Some(kademlia)
         } else {
             None
@@ -207,7 +204,6 @@ impl Engine {
             swarm,
             tor_connection: None,
             peer_id,
-            has_kademlia,
             query_map: HashMap::new(),
             event_queue: VecDeque::new(),
         })
@@ -321,31 +317,28 @@ impl Engine {
     // for the peer address, we need to first run a query for it. See
     // https://github.com/libp2p/rust-libp2p/issues/1568.
     pub async fn find_peer(&mut self, peer: &PeerId) {
-        if self.has_kademlia {
-            self.event_queue.push_back(
-                EngineEvent::SystemMessage(
-                    format!("Initiating finding peer {} with Kademlia, please be patient, this might take a minute", peer)
-                )
-            );
-            let query_id = self
-                .swarm
-                .behaviour_mut()
-                .kademlia
-                .as_mut()
-                .unwrap()
-                .get_closest_peers(*peer);
+        match self.swarm.behaviour_mut().kademlia.as_mut() {
+            Some(kademlia) => {
+                self.event_queue.push_back(
+                    EngineEvent::SystemMessage(
+                        format!("Initiating finding peer {} with Kademlia, please be patient, this might take a minute", peer)
+                    )
+                );
+                let query_id = kademlia.get_closest_peers(*peer);
 
-            // Insert query id and peer id into map, to be looked up
-            // later when the query response comes in
-            self.query_map.insert(query_id, *peer);
-        } else {
-            let addresses = self.swarm.behaviour_mut().addresses_of_peer(peer);
+                // Insert query id and peer id into map, to be looked up
+                // later when the query response comes in
+                self.query_map.insert(query_id, *peer);
+            }
+            None => {
+                let addresses = self.swarm.behaviour_mut().addresses_of_peer(peer);
 
-            // Inject the event "artificially" into the event handler
-            self.event_queue.push_back(EngineEvent::PeerAddresses {
-                peer: *peer,
-                addresses,
-            });
+                // Inject the event "artificially" into the event handler
+                self.event_queue.push_back(EngineEvent::PeerAddresses {
+                    peer: *peer,
+                    addresses,
+                });
+            }
         }
     }
 
