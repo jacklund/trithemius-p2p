@@ -5,6 +5,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use libp2p::gossipsub::IdentTopic;
+use libp2p::rendezvous::Namespace;
 use libp2p::{core::transport::ListenerId, Multiaddr, PeerId};
 use log::debug;
 use std::str::FromStr;
@@ -343,6 +344,17 @@ impl UI {
         Ok(())
     }
 
+    pub fn register(
+        &mut self,
+        engine: &mut Engine,
+        namespace: &str,
+        rendezvous_node: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rendezvous_node = PeerId::from_str(rendezvous_node)?;
+        let namespace = Namespace::new(namespace.to_string())?;
+        Ok(engine.register(namespace, rendezvous_node)?)
+    }
+
     pub async fn find_peer(
         &mut self,
         engine: &mut Engine,
@@ -486,6 +498,81 @@ impl UI {
                         Some(peer_id) => self.find_peer(engine, peer_id).await?,
                         None => {
                             self.log_error("'findpeer' command requires Peer ID to find");
+                        }
+                    }
+                    Ok(None)
+                }
+                "register" => {
+                    debug!("Got register command");
+                    match (command_args.pop_front(), command_args.pop_front()) {
+                        (Some(namespace), Some(rendezvous_node)) => {
+                            match self.register(engine, namespace, rendezvous_node) {
+                                Ok(_) => {
+                                    self.log_info(&format!(
+                                        "Registered in namespace {}",
+                                        namespace
+                                    ));
+                                }
+                                Err(error) => {
+                                    self.log_error(&format!("{}", error));
+                                }
+                            }
+                        }
+                        _ => {
+                            self.log_error("'register' command requires a namespace and a rendezvous node peer ID");
+                        }
+                    }
+                    Ok(None)
+                }
+                "discover" => {
+                    debug!("Got register command");
+                    match (
+                        command_args.pop_front(),
+                        command_args.pop_front(),
+                        command_args.pop_front(),
+                    ) {
+                        (Some(rendezvous_node), namespace, limit) => {
+                            let rendezvous_node = match PeerId::from_str(rendezvous_node) {
+                                Ok(rendezvous_node) => rendezvous_node,
+                                Err(error) => {
+                                    self.log_error(&format!(
+                                        "Error converting rendezvous node to PeerId: {}",
+                                        error
+                                    ));
+                                    return Ok(None);
+                                }
+                            };
+                            let namespace = match namespace {
+                                Some(namespace) => match Namespace::new(namespace.to_string()) {
+                                    Ok(namespace) => Some(namespace),
+                                    Err(_) => {
+                                        self.log_error("Namespace string is too long");
+                                        return Ok(None);
+                                    }
+                                },
+                                None => None,
+                            };
+                            let limit = match limit {
+                                Some(limit) => match limit.parse::<u64>() {
+                                    Ok(limit) => Some(limit),
+                                    Err(error) => {
+                                        self.log_error(&format!(
+                                            "Error parsing limit parameter: {}",
+                                            error,
+                                        ));
+                                        return Ok(None);
+                                    }
+                                },
+                                None => None,
+                            };
+                            if let Err(error) =
+                                engine.discover(namespace, None, limit, rendezvous_node)
+                            {
+                                self.log_error(&format!("Error in discover: {}", error));
+                            }
+                        }
+                        _ => {
+                            self.log_error("'discover' command requires a rendezvous node peer ID");
                         }
                     }
                     Ok(None)

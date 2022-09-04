@@ -1,14 +1,15 @@
 use crate::ui::{Renderer, UI};
 use async_trait::async_trait;
-use clap::{Parser, ValueEnum};
+use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
 use libp2p::{
     autonat::Config as AutonatConfig, core::ConnectedPoint, identity, kad::KademliaConfig,
-    mdns::MdnsConfig, PeerId,
+    mdns::MdnsConfig, rendezvous::Namespace, PeerId,
 };
 use log::debug;
+use std::str::FromStr;
 // use log::LevelFilter;
 // use simple_logging;
 use std::pin::Pin;
@@ -85,6 +86,12 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 
         if let Some(port) = &self.cli.create_onion_service {
             self.ui.create_onion_service(engine, port, None).await;
+        }
+
+        if let Some(namespace_nodes) = &self.cli.register {
+            for namespace_node in namespace_nodes {
+                engine.register(namespace_node.clone().namespace, namespace_node.node_id)?;
+            }
         }
 
         Ok(())
@@ -246,6 +253,67 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 }
                 None
             }
+            EngineEvent::RendezvousServerPeerRegistered { peer, registration } => {
+                self.ui.log_info(&format!(
+                    "Peer {} registered with namespace {}",
+                    peer, registration.namespace
+                ));
+                None
+            }
+            EngineEvent::RendezvousServerPeerNotRegistered {
+                peer,
+                namespace: _,
+                error,
+            } => {
+                self.ui
+                    .log_info(&format!("Peer {} not registered: {:?}", peer, error));
+                None
+            }
+            EngineEvent::RendezvousServerPeerUnregistered { peer, namespace } => {
+                self.ui.log_info(&format!(
+                    "Peer {} unregistered, namespace {}",
+                    peer, namespace
+                ));
+                None
+            }
+            EngineEvent::RendezvousClientRegistered {
+                rendezvous_node,
+                ttl,
+                namespace,
+            } => {
+                self.ui.log_info(&format!(
+                    "Registered with node {} in namespace {} with ttl {}",
+                    rendezvous_node, namespace, ttl
+                ));
+                None
+            }
+            EngineEvent::RendezvousClientRegisterFailed(error) => {
+                self.ui
+                    .log_error(&format!("Registration failed: {}", error));
+                None
+            }
+            EngineEvent::RendezvousClientDiscovered {
+                rendezvous_node,
+                registrations: _,
+                cookie: _,
+            } => {
+                self.ui.log_info(&format!(
+                    "Discovery succeeded for rendezvous node {}",
+                    rendezvous_node
+                ));
+                None
+            }
+            EngineEvent::RendezvousClientDiscoverFailed {
+                rendezvous_node,
+                namespace,
+                error,
+            } => {
+                self.ui.log_error(&format!(
+                    "Discovery failed for rendezvous node {}, namespace {:?}: {:?}",
+                    rendezvous_node, namespace, error
+                ));
+                None
+            }
             _ => None,
         })
     }
@@ -274,6 +342,69 @@ enum NatTraversal {
     Dcutr,
 }
 
+#[derive(Clone, Debug)]
+pub struct NamespaceAndNodeId {
+    namespace: Namespace,
+    node_id: PeerId,
+}
+
+impl clap::builder::ValueParserFactory for NamespaceAndNodeId {
+    type Parser = NamespaceAndNodeIdParser;
+    fn value_parser() -> Self::Parser {
+        NamespaceAndNodeIdParser
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NamespaceAndNodeIdParser;
+
+impl clap::builder::TypedValueParser for NamespaceAndNodeIdParser {
+    type Value = NamespaceAndNodeId;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let mut cmd = Cli::command();
+        match value.to_str() {
+            Some(value_str) => {
+                if value_str.contains('/') {
+                    let values = value_str.split_once('/').unwrap();
+                    let namespace = match Namespace::new(values.0.to_string()) {
+                        Ok(namespace) => namespace,
+                        Err(_) => {
+                            return Err(
+                                cmd.error(ErrorKind::ValueValidation, "Namespace is too long")
+                            )
+                        }
+                    };
+                    let node_id = match PeerId::from_str(values.1) {
+                        Ok(node_id) => node_id,
+                        Err(error) => {
+                            return Err(cmd.error(
+                                ErrorKind::ValueValidation,
+                                format!("Error parsing peer ID: {}", error),
+                            ))
+                        }
+                    };
+                    Ok(Self::Value { namespace, node_id })
+                } else {
+                    Err(cmd.error(
+                        ErrorKind::ValueValidation,
+                        "Namespace and NodeId should be specified as 'NAMESPACE/NODE_ID'",
+                    ))
+                }
+            }
+            None => Err(cmd.error(
+                ErrorKind::ValueValidation,
+                "Namespace and NodeId aren't valid unicode",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Parser)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
@@ -294,6 +425,18 @@ pub struct Cli {
 
     #[clap(long, value_name = "ADDRESS")]
     create_onion_service: Option<String>,
+
+    #[clap(long)]
+    rendezvous_server: bool,
+
+    #[clap(
+        long,
+        value_parser,
+        multiple_values = true,
+        use_value_delimiter = true,
+        value_name = "NAMESPACE/PEER_ID"
+    )]
+    register: Option<Vec<NamespaceAndNodeId>>,
 }
 
 impl From<Cli> for EngineConfig {
@@ -307,7 +450,7 @@ impl From<Cli> for EngineConfig {
                         config.kademlia_config = KademliaConfig::default();
                     }
                     Discovery::Mdns => config.mdns_config = Some(MdnsConfig::default()),
-                    Discovery::Rendezvous => config.use_rendezvous = true,
+                    Discovery::Rendezvous => config.rendezvous_client = true,
                 }
             }
         }
@@ -320,6 +463,10 @@ impl From<Cli> for EngineConfig {
                 }
             }
         }
+        if cli.rendezvous_server {
+            config.rendezvous_server = true;
+        }
+
         config
     }
 }
@@ -331,6 +478,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
 
     let cli = Cli::parse();
+
+    if cli.register.is_some()
+        && cli.discovery.is_some()
+        && !cli
+            .discovery
+            .as_ref()
+            .unwrap()
+            .contains(&Discovery::Rendezvous)
+    {
+        Err("Can only register if rendezvous discovery is enabled")?;
+    }
 
     // Create a random Keypair
     let keypair = identity::Keypair::generate_ed25519();

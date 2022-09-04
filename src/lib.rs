@@ -27,6 +27,11 @@ use libp2p::{
     mdns::{Mdns, MdnsConfig},
     mplex, noise,
     ping::{Ping, PingConfig},
+    rendezvous::{
+        client::Behaviour as RendezvousClientBehaviour,
+        server::{Behaviour as RendezvousServerBehaviour, Config as RendezvousServerConfig},
+        Cookie, Namespace,
+    },
     swarm::behaviour::toggle::Toggle,
     swarm::{DialError, NetworkBehaviour, Swarm, SwarmBuilder},
     Multiaddr, NetworkBehaviour, PeerId, Transport, TransportError,
@@ -47,13 +52,15 @@ const KAD_BOOTNODES: [&str; 4] = [
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "EngineEvent")]
 pub struct EngineBehaviour {
-    pub_sub: Gossipsub,
-    ping: Ping,
     autonat: Toggle<Autonat>,
     dcutr: Toggle<Dcutr>,
+    identify: Identify,
     kademlia: Toggle<Kademlia<MemoryStore>>,
     mdns: Toggle<Mdns>,
-    identify: Identify,
+    ping: Ping,
+    pub_sub: Gossipsub,
+    rendezvous_client: Toggle<RendezvousClientBehaviour>,
+    rendezvous_server: Toggle<RendezvousServerBehaviour>,
 }
 
 #[derive(Debug)]
@@ -127,6 +134,21 @@ pub trait Handler<B: NetworkBehaviour, F: FusedStream> {
     async fn update(&mut self) -> Result<(), std::io::Error>;
 }
 
+#[derive(Debug)]
+pub enum EngineError {
+    Error(String),
+}
+
+impl std::error::Error for EngineError {}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            EngineError::Error(error) => write!(f, "{}", error),
+        }
+    }
+}
+
 pub struct Engine {
     swarm: Swarm<EngineBehaviour>,
     tor_connection: Option<TorControlConnection>,
@@ -150,7 +172,8 @@ pub struct EngineConfig {
     pub kademlia_type: Option<KademliaType>,
     pub kademlia_config: KademliaConfig,
     pub mdns_config: Option<MdnsConfig>,
-    pub use_rendezvous: bool,
+    pub rendezvous_server: bool,
+    pub rendezvous_client: bool,
 }
 
 impl Engine {
@@ -189,21 +212,35 @@ impl Engine {
             None => None,
         };
 
+        let rendezvous_client = match config.rendezvous_client {
+            true => Some(RendezvousClientBehaviour::new(keypair.clone())),
+            false => None,
+        };
+
+        let rendezvous_server = match config.rendezvous_server {
+            true => Some(RendezvousServerBehaviour::new(
+                RendezvousServerConfig::default(),
+            )),
+            false => None,
+        };
+
         let behaviour = EngineBehaviour {
+            autonat: Toggle::from(autonat),
+            dcutr: Toggle::from(dcutr),
+            identify: Identify::new(IdentifyConfig::new(
+                "ipfs/id/1.0.0".to_string(),
+                keypair.public(),
+            )),
+            kademlia: Toggle::from(kademlia),
+            mdns: Toggle::from(mdns),
+            ping: Ping::new(PingConfig::new().with_keep_alive(true)),
             pub_sub: Gossipsub::new(
                 MessageAuthenticity::Signed(keypair.clone()),
                 config.gossipsub_config,
             )
             .expect("Correct configuration"),
-            ping: Ping::new(PingConfig::new().with_keep_alive(true)),
-            autonat: Toggle::from(autonat),
-            dcutr: Toggle::from(dcutr),
-            kademlia: Toggle::from(kademlia),
-            mdns: Toggle::from(mdns),
-            identify: Identify::new(IdentifyConfig::new(
-                "ipfs/id/1.0.0".to_string(),
-                keypair.public(),
-            )),
+            rendezvous_client: Toggle::from(rendezvous_client),
+            rendezvous_server: Toggle::from(rendezvous_server),
         };
 
         let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
@@ -294,6 +331,40 @@ impl Engine {
         ret
     }
 
+    pub fn register(
+        &mut self,
+        namespace: Namespace,
+        rendezvous_node: PeerId,
+    ) -> Result<(), EngineError> {
+        match self.swarm.behaviour_mut().rendezvous_client.as_mut() {
+            Some(client) => {
+                client.register(namespace, rendezvous_node, None);
+                Ok(())
+            }
+            None => Err(EngineError::Error(
+                "Cannot register without rendezvous discovery enabled".to_string(),
+            )),
+        }
+    }
+
+    pub fn discover(
+        &mut self,
+        namespace: Option<Namespace>,
+        cookie: Option<Cookie>,
+        limit: Option<u64>,
+        rendezvous_node: PeerId,
+    ) -> Result<(), EngineError> {
+        match self.swarm.behaviour_mut().rendezvous_client.as_mut() {
+            Some(client) => {
+                client.discover(namespace, cookie, limit, rendezvous_node);
+                Ok(())
+            }
+            None => Err(EngineError::Error(
+                "Cannot discover without rendezvous discovery enabled".to_string(),
+            )),
+        }
+    }
+
     // This is kind of strange. If we're using Kademlia, we can't just ask
     // for the peer address, we need to first run a query for it. See
     // https://github.com/libp2p/rust-libp2p/issues/1568.
@@ -362,6 +433,14 @@ impl Engine {
                     debug!("Got event {:?}", event);
                     let engine_event = event.into();
                     match engine_event {
+                        EngineEvent::NewListenAddr {
+                            listener_id: _,
+                            ref address,
+                        } => {
+                            self.swarm
+                                .add_external_address(address.clone(), libp2p::swarm::AddressScore::Infinite);
+                            handler.handle_event(self, engine_event).await?;
+                        },
                         // Kademlia query has completed, we can check the peer addresses now
                         EngineEvent::KadOutboundQueryCompleted {
                             id,
