@@ -135,6 +135,7 @@ impl Engine {
         let peer_id = PeerId::from(keypair.public());
         let transport = create_transport(&keypair)?;
 
+        // Set up the various sub-behaviours
         let autonat = config
             .autonat_config
             .map(|config| Autonat::new(peer_id, config));
@@ -173,6 +174,7 @@ impl Engine {
             false => None,
         };
 
+        // Create the main behaviour
         let behaviour = EngineBehaviour {
             autonat: Toggle::from(autonat),
             dcutr: Toggle::from(dcutr),
@@ -192,6 +194,7 @@ impl Engine {
             rendezvous_server: Toggle::from(rendezvous_server),
         };
 
+        // Build the swarm
         let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
             // We want the connection background tasks to be spawned
             // onto the tokio runtime.
