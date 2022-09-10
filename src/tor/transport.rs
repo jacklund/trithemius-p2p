@@ -1,8 +1,8 @@
 use futures::future::{FutureExt, MapErr, TryFutureExt};
+use libp2p::{multiaddr::Protocol, Multiaddr};
 use libp2p_core::transport::{ListenerId, Transport, TransportError, TransportEvent};
 use libp2p_dns::{DnsErr, TokioDnsConfig};
 use libp2p_tcp::{tokio::TcpStream, GenTcpConfig, GenTcpTransport, TokioTcpTransport};
-use multiaddr::{Multiaddr, Protocol};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
