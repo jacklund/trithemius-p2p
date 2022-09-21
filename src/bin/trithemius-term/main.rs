@@ -4,19 +4,16 @@ use clap::Parser;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures::task::Poll;
 use futures_lite::stream::StreamExt;
-use libp2p::{
-    autonat::Config as AutonatConfig, core::ConnectedPoint, identity, kad::KademliaConfig,
-    mdns::MdnsConfig, PeerId,
-};
+use libp2p::{core::ConnectedPoint, identity, PeerId};
 use log::debug;
 // use log::LevelFilter;
 // use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
-    cli::{Discovery, NamespaceAndNodeId, NatTraversal},
+    cli::{Cli, Discovery},
     engine_event::EngineEvent,
-    ChatMessage, Engine, EngineBehaviour, EngineConfig, Handler, InputEvent, KademliaType,
+    ChatMessage, Engine, EngineBehaviour, EngineConfig, Handler, InputEvent,
 };
 
 pub mod ui;
@@ -229,8 +226,8 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 ));
                 None
             }
-            EngineEvent::Dialing(_peer_id) => {
-                // self.ui.log_info(&format!("Dialing {}", peer_id,));
+            EngineEvent::Dialing(peer_id) => {
+                self.ui.log_info(&format!("Dialing {}", peer_id,));
                 None
             }
             EngineEvent::MdnsDiscovered(peers) => {
@@ -330,72 +327,6 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
     async fn update(&mut self) -> Result<(), std::io::Error> {
         // debug!("Called handler::update()");
         self.renderer.render(&self.ui)
-    }
-}
-
-#[derive(Clone, Parser)]
-#[clap(author, version, about, long_about = None)]
-pub struct Cli {
-    #[clap(long, value_parser, multiple_values = true, use_value_delimiter = true)]
-    discovery: Option<Vec<Discovery>>,
-
-    #[clap(long, value_parser, multiple_values = true, use_value_delimiter = true)]
-    nat_traversal: Option<Vec<NatTraversal>>,
-
-    #[clap(long, value_parser, value_name = "TOPIC")]
-    subscribe: Option<String>,
-
-    #[clap(long, value_parser, value_name = "ADDRESS")]
-    listen: Option<String>,
-
-    #[clap(long, value_parser, value_name = "ADDRESS")]
-    connect: Option<String>,
-
-    #[clap(long, value_name = "ADDRESS")]
-    create_onion_service: Option<String>,
-
-    #[clap(long)]
-    rendezvous_server: bool,
-
-    #[clap(
-        long,
-        value_parser,
-        multiple_values = true,
-        use_value_delimiter = true,
-        value_name = "NAMESPACE/PEER_ID"
-    )]
-    register: Option<Vec<NamespaceAndNodeId>>,
-}
-
-impl From<Cli> for EngineConfig {
-    fn from(cli: Cli) -> EngineConfig {
-        let mut config = EngineConfig::default();
-        if cli.discovery.is_some() {
-            for discovery_type in cli.discovery.unwrap() {
-                match discovery_type {
-                    Discovery::Kademlia => {
-                        config.kademlia_type = Some(KademliaType::Ip2p);
-                        config.kademlia_config = KademliaConfig::default();
-                    }
-                    Discovery::Mdns => config.mdns_config = Some(MdnsConfig::default()),
-                    Discovery::Rendezvous => config.rendezvous_client = true,
-                }
-            }
-        }
-        if cli.nat_traversal.is_some() {
-            for nat_traversal in cli.nat_traversal.unwrap() {
-                match nat_traversal {
-                    NatTraversal::Autonat => config.autonat_config = Some(AutonatConfig::default()),
-                    NatTraversal::CircuitRelay => config.use_circuit_relay = true,
-                    NatTraversal::Dcutr => config.use_dcutr = true,
-                }
-            }
-        }
-        if cli.rendezvous_server {
-            config.rendezvous_server = true;
-        }
-
-        config
     }
 }
 

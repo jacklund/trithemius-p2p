@@ -1,5 +1,5 @@
-use clap::{error::ErrorKind, ValueEnum};
-use libp2p::{rendezvous::Namespace, PeerId};
+use clap::{error::ErrorKind, Parser, ValueEnum};
+use libp2p::{rendezvous::Namespace, Multiaddr, PeerId};
 use std::fmt::Display;
 use std::str::FromStr;
 
@@ -78,4 +78,41 @@ impl clap::builder::TypedValueParser for NamespaceAndNodeIdParser {
             )),
         }
     }
+}
+
+#[derive(Clone, Parser)]
+#[clap(author, version, about, long_about = None)]
+pub struct Cli {
+    #[clap(long, value_parser, multiple_values = true, use_value_delimiter = true)]
+    pub discovery: Option<Vec<Discovery>>,
+
+    #[clap(long, value_parser, multiple_values = true, use_value_delimiter = true)]
+    pub nat_traversal: Option<Vec<NatTraversal>>,
+
+    #[clap(long, value_parser, value_name = "TOPIC")]
+    pub subscribe: Option<String>,
+
+    #[clap(long, value_parser, value_name = "ADDRESS")]
+    pub listen: Option<String>,
+
+    #[clap(long, value_parser, value_name = "ADDRESS")]
+    pub connect: Option<String>,
+
+    #[clap(long, value_name = "ADDRESS")]
+    pub create_onion_service: Option<String>,
+
+    #[clap(long)]
+    pub rendezvous_server: bool,
+
+    #[clap(
+        long,
+        value_parser,
+        multiple_values = true,
+        use_value_delimiter = true,
+        value_name = "NAMESPACE/PEER_ID"
+    )]
+    pub register: Option<Vec<NamespaceAndNodeId>>,
+
+    #[clap(long, value_parser, value_name = "PROXY_ADDRESS")]
+    pub tor_proxy_address: Option<Multiaddr>,
 }

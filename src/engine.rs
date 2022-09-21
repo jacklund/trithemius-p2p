@@ -1,16 +1,16 @@
-use crate::cli::{Discovery, NatTraversal};
+use crate::cli::{Cli, Discovery, NatTraversal};
 use crate::engine_event::EngineEvent;
 use crate::tor::{
     auth::TorAuthentication,
     control_connection::{OnionService, TorControlConnection},
     error::TorError,
-    transport::TorDnsTransport,
 };
+use crate::transports::tor::TorTransport;
 use crate::Handler;
 use futures::stream::FusedStream;
 use libp2p::{
-    autonat::{self, Behaviour as Autonat},
-    core::{muxing::StreamMuxerBox, transport::Boxed, transport::ListenerId, upgrade},
+    autonat::{self, Behaviour as Autonat, Config as AutonatConfig},
+    core::{either::EitherOutput, transport::Boxed, transport::ListenerId, upgrade},
     futures::StreamExt,
     gossipsub::{
         error::{PublishError, SubscriptionError},
@@ -32,9 +32,10 @@ use libp2p::{
     Multiaddr, NetworkBehaviour, PeerId, Transport, TransportError,
 };
 use libp2p_dcutr::behaviour::Behaviour as Dcutr;
+use libp2p_dns::TokioDnsConfig;
+use libp2p_tcp::{GenTcpConfig, TokioTcpTransport};
 use log::debug;
 use std::collections::{HashMap, VecDeque};
-use std::net::ToSocketAddrs;
 use std::str::FromStr;
 
 #[derive(Debug)]
@@ -67,26 +68,18 @@ pub struct EngineBehaviour {
 }
 
 pub fn create_transport(
-    keypair: &identity::Keypair,
-) -> Result<Boxed<(PeerId, StreamMuxerBox)>, Box<dyn std::error::Error>> {
+    tor_proxy_address: Multiaddr,
+) -> Result<
+    Boxed<EitherOutput<libp2p_tcp::tokio::TcpStream, libp2p_tcp::tokio::TcpStream>>,
+    Box<dyn std::error::Error>,
+> {
     // Create a keypair for authenticated encryption of the transport.
-    let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
-        .into_authentic(keypair)
-        .expect("Signing libp2p-noise static DH keypair failed.");
-
-    // We wrap the base libp2p tokio TCP transport inside the tokio DNS transport, inside our Tor
-    // wrapper. Tor wrapper has to be first, so that an onion address isn't resolved by the DNS
-    // layer. We need the DNS layer there in case we get a DNS hostname (unlikely, but possible).
-    Ok(TorDnsTransport::new(
-        ("127.0.0.1", 9050) // TODO: Configure the TOR SOCKS5 proxy address
-            .to_socket_addrs()?
-            .next()
-            .unwrap(),
-    )?
-    .upgrade(upgrade::Version::V1)
-    .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
-    .multiplex(mplex::MplexConfig::new())
-    .boxed())
+    // TODO: Add SOCKS5 transport
+    Ok(TorTransport::new(tor_proxy_address)?
+        .or_transport(TokioDnsConfig::system(TokioTcpTransport::new(
+            GenTcpConfig::default().nodelay(true),
+        ))?)
+        .boxed())
 }
 
 const KAD_BOOTNODES: [&str; 4] = [
@@ -107,7 +100,7 @@ pub enum InputEvent {
     Shutdown,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct EngineConfig {
     pub gossipsub_config: GossipsubConfig,
     pub autonat_config: Option<autonat::Config>,
@@ -118,6 +111,57 @@ pub struct EngineConfig {
     pub mdns_config: Option<MdnsConfig>,
     pub rendezvous_server: bool,
     pub rendezvous_client: bool,
+    pub tor_proxy_address: Multiaddr,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            gossipsub_config: Default::default(),
+            autonat_config: Default::default(),
+            use_circuit_relay: Default::default(),
+            use_dcutr: Default::default(),
+            kademlia_type: Default::default(),
+            kademlia_config: Default::default(),
+            mdns_config: Default::default(),
+            rendezvous_server: Default::default(),
+            rendezvous_client: Default::default(),
+            tor_proxy_address: Multiaddr::from_str("/tcp/9050/ip4/127.0.0.1")
+                .expect("Multiaddr parse failed"),
+        }
+    }
+}
+
+impl From<Cli> for EngineConfig {
+    fn from(cli: Cli) -> EngineConfig {
+        let mut config = EngineConfig::default();
+        if cli.discovery.is_some() {
+            for discovery_type in cli.discovery.unwrap() {
+                match discovery_type {
+                    Discovery::Kademlia => {
+                        config.kademlia_type = Some(KademliaType::Ip2p);
+                        config.kademlia_config = KademliaConfig::default();
+                    }
+                    Discovery::Mdns => config.mdns_config = Some(MdnsConfig::default()),
+                    Discovery::Rendezvous => config.rendezvous_client = true,
+                }
+            }
+        }
+        if cli.nat_traversal.is_some() {
+            for nat_traversal in cli.nat_traversal.unwrap() {
+                match nat_traversal {
+                    NatTraversal::Autonat => config.autonat_config = Some(AutonatConfig::default()),
+                    NatTraversal::CircuitRelay => config.use_circuit_relay = true,
+                    NatTraversal::Dcutr => config.use_dcutr = true,
+                }
+            }
+        }
+        if cli.rendezvous_server {
+            config.rendezvous_server = true;
+        }
+
+        config
+    }
 }
 
 pub struct Engine {
@@ -136,7 +180,15 @@ impl Engine {
         config: EngineConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let peer_id = PeerId::from(keypair.public());
-        let transport = create_transport(&keypair)?;
+        let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
+            .into_authentic(&keypair)
+            .expect("Signing libp2p-noise static DH keypair failed.");
+
+        let transport = create_transport(config.tor_proxy_address)?
+            .upgrade(upgrade::Version::V1)
+            .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
+            .multiplex(mplex::MplexConfig::new())
+            .boxed();
         let mut discovery = Vec::new();
         let mut nat_traversal = Vec::new();
 
@@ -438,5 +490,72 @@ impl Engine {
                 handler.handle_event(self, event).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{
+        channel::mpsc,
+        io::{AsyncReadExt, AsyncWriteExt},
+        SinkExt,
+    };
+    use libp2p::core::transport::TransportEvent;
+
+    #[test]
+    fn handle_multiaddrs() -> Result<(), Box<dyn std::error::Error>> {
+        async fn listener(addr: Multiaddr, mut ready_tx: mpsc::Sender<Multiaddr>) {
+            let mut transport = create_transport(Multiaddr::empty()).unwrap();
+            transport.listen_on(addr).unwrap();
+            loop {
+                match transport.select_next_some().await {
+                    TransportEvent::NewAddress { listen_addr, .. } => {
+                        ready_tx.send(listen_addr).await.unwrap();
+                    }
+                    TransportEvent::Incoming { upgrade, .. } => {
+                        let mut upgrade = upgrade.await.unwrap();
+                        let mut buf = [0u8; 3];
+                        upgrade.read_exact(&mut buf).await.unwrap();
+                        assert_eq!(buf, [1, 2, 3]);
+                        upgrade.write_all(&[4, 5, 6]).await.unwrap();
+                        return;
+                    }
+                    e => panic!("Unexpected transport event: {:?}", e),
+                }
+            }
+        }
+
+        async fn dialer(mut ready_rx: mpsc::Receiver<Multiaddr>) {
+            let addr = ready_rx.next().await.unwrap();
+            let mut transport = create_transport(Multiaddr::empty()).unwrap();
+
+            // Obtain a future socket through dialing
+            let mut socket = transport.dial(addr.clone()).unwrap().await.unwrap();
+            socket.write_all(&[0x1, 0x2, 0x3]).await.unwrap();
+
+            let mut buf = [0u8; 3];
+            socket.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf, [4, 5, 6]);
+        }
+
+        fn test(addr: Multiaddr) {
+            let (ready_tx, ready_rx) = mpsc::channel(1);
+            let listener = listener(addr.clone(), ready_tx);
+            let dialer = dialer(ready_rx);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .unwrap();
+            let tasks = tokio::task::LocalSet::new();
+            let listener = tasks.spawn_local(listener);
+            tasks.block_on(&rt, dialer);
+            tasks.block_on(&rt, listener).unwrap();
+        }
+
+        test("/ip4/127.0.0.1/tcp/0".parse().unwrap());
+        test("/ip6/::1/tcp/0".parse().unwrap());
+
+        Ok(())
     }
 }

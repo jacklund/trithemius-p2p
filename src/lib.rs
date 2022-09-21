@@ -7,6 +7,7 @@ pub mod engine_event;
 pub mod network_addr;
 pub mod subscriptions;
 pub mod tor;
+pub mod transports;
 
 pub use crate::cli::{Discovery, NamespaceAndNodeId, NamespaceAndNodeIdParser, NatTraversal};
 pub use crate::engine::{Engine, EngineBehaviour, EngineConfig, InputEvent, KademliaType};
