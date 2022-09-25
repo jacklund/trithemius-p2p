@@ -98,8 +98,8 @@ pub struct Cli {
     #[clap(long, value_parser, value_name = "ADDRESS")]
     pub connect: Option<String>,
 
-    #[clap(long, value_name = "ADDRESS")]
-    pub create_onion_service: Option<String>,
+    #[clap(long, min_values = 1, max_values = 2, use_value_delimiter = true)]
+    pub create_onion_service: Option<Vec<String>>,
 
     #[clap(long)]
     pub rendezvous_server: bool,
@@ -112,6 +112,9 @@ pub struct Cli {
         value_name = "NAMESPACE/PEER_ID"
     )]
     pub register: Option<Vec<NamespaceAndNodeId>>,
+
+    #[clap(long)]
+    pub use_tor: bool,
 
     #[clap(long, value_parser, value_name = "PROXY_ADDRESS")]
     pub tor_proxy_address: Option<Multiaddr>,

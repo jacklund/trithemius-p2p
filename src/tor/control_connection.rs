@@ -7,6 +7,9 @@ use libp2p::{
     Multiaddr,
 };
 use regex::Regex;
+use std::borrow::Cow;
+use std::net::SocketAddr;
+use std::str::FromStr;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
@@ -14,7 +17,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 #[derive(Debug)]
 pub struct OnionService {
     pub virt_port: u16,
-    pub target_port: u16,
+    pub listen_address: Multiaddr,
     pub service_id: String,
     pub address: Multiaddr,
 }
@@ -190,14 +193,36 @@ impl TorControlConnection {
     pub async fn create_transient_onion_service(
         &mut self,
         virt_port: u16,
-        target_port: u16,
+        listen_address: Multiaddr,
     ) -> Result<OnionService, TorError> {
+        let mut iter = listen_address.iter();
+        let listen_address_str = match iter.next() {
+            Some(Protocol::Ip4(ip4)) => match iter.next() {
+                Some(Protocol::Tcp(port)) => Ok(format!("{}:{}", ip4, port)),
+                _ => Err(TorError::ProtocolError(format!(
+                    "Bad address: {}",
+                    listen_address
+                ))),
+            },
+            Some(Protocol::Ip6(ip6)) => match iter.next() {
+                Some(Protocol::Tcp(port)) => Ok(format!("{}:{}", ip6, port)),
+                _ => Err(TorError::ProtocolError(format!(
+                    "Bad address: {}",
+                    listen_address
+                ))),
+            },
+            Some(Protocol::Unix(path)) => Ok(format!("unix:{}", path)),
+            _ => Err(TorError::ProtocolError(format!(
+                "Bad address: {}",
+                listen_address
+            ))),
+        }?;
         let control_response = self
             .send_command(
                 "ADD_ONION",
                 Some(format!(
                     "NEW:BEST Flags=DiscardPK Port={},{}",
-                    virt_port, target_port
+                    virt_port, listen_address_str
                 )),
             )
             .await?;
@@ -217,7 +242,7 @@ impl TorControlConnection {
                 addr.push(Protocol::Onion3(Onion3Addr::from((hash, virt_port))));
                 Ok(OnionService {
                     virt_port,
-                    target_port,
+                    listen_address,
                     service_id: hash_string.to_string(),
                     address: addr,
                 })
@@ -228,6 +253,44 @@ impl TorControlConnection {
                 control_response.response.join(" "),
             ))),
         }
+    }
+
+    pub async fn get_hidden_service_port_mappings(
+        &mut self,
+    ) -> Result<Vec<(u16, Multiaddr)>, TorError> {
+        let control_response = self
+            .send_command("GETCONF", Some("HiddenServicePort".to_string()))
+            .await?;
+        lazy_static! {
+            static ref RE: Regex =
+                Regex::new(r"^HiddenServicePort=(?P<virtual_port>\d*) (?P<target_addr>.*)$")
+                    .unwrap();
+        }
+        let mut ret = Vec::new();
+        for response in control_response.response.clone() {
+            match RE.captures(&response) {
+                Some(captures) => {
+                    let target_addr: Multiaddr = if captures["target_addr"].starts_with("unix:") {
+                        let mut addr = Multiaddr::empty();
+                        addr.push(Protocol::Unix(Cow::Borrowed(&captures["target_addr"][5..])));
+                        addr
+                    } else {
+                        let socket_addr = SocketAddr::from_str(&captures["target_addr"]).unwrap();
+                        let mut addr = Multiaddr::empty();
+                        addr.push(socket_addr.ip().into());
+                        addr.push(Protocol::Tcp(socket_addr.port()));
+                        addr
+                    };
+                    ret.push((captures["virtual_port"].parse().unwrap(), target_addr));
+                }
+                None => Err(TorError::ProtocolError(format!(
+                    "Unexpected response: {} {}",
+                    control_response.code,
+                    control_response.response.join(" "),
+                )))?,
+            }
+        }
+        Ok(ret)
     }
 }
 

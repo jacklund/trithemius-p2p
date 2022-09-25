@@ -421,18 +421,21 @@ impl UI {
         &mut self,
         engine: &mut Engine,
         virt_port_str: &str,
-        target_port_opt: Option<&str>,
+        listen_address: Option<&str>,
     ) {
-        let (virt_port, target_port) = match virt_port_str.parse::<u16>() {
-            Ok(virt_port) => match target_port_opt {
-                Some(target_port_str) => match target_port_str.parse::<u16>() {
-                    Ok(target_port) => (virt_port, target_port),
+        let (virt_port, listen_address) = match virt_port_str.parse::<u16>() {
+            Ok(virt_port) => match listen_address {
+                Some(address_string) => match Multiaddr::from_str(address_string) {
+                    Ok(listen_address) => (virt_port, listen_address),
                     Err(error) => {
-                        self.log_error(&format!("Error parsing target port: {}", error));
+                        self.log_error(&format!("Error parsing listen address: {}", error));
                         return;
                     }
                 },
-                None => (virt_port, virt_port),
+                None => (
+                    virt_port,
+                    Multiaddr::from_str(&format!("/ip4/127.0.0.1/tcp/{}", virt_port)).unwrap(),
+                ),
             },
             Err(error) => {
                 self.log_error(&format!("Error parsing virtual port: {}", error));
@@ -441,7 +444,7 @@ impl UI {
         };
 
         match engine
-            .create_transient_onion_service(virt_port, target_port)
+            .create_transient_onion_service(virt_port, listen_address)
             .await
         {
             Ok(onion_service) => {

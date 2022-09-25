@@ -86,8 +86,15 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
             self.ui.subscribe(engine, topic);
         }
 
-        if let Some(port) = &self.cli.create_onion_service {
-            self.ui.create_onion_service(engine, port, None).await;
+        if let Some(values) = &self.cli.create_onion_service {
+            let listen_address = if values.len() > 1 {
+                Some(values[1].as_str())
+            } else {
+                None
+            };
+            self.ui
+                .create_onion_service(engine, &values[0], listen_address)
+                .await;
         }
 
         if let Some(namespace_nodes) = &self.cli.register {
