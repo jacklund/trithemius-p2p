@@ -1,7 +1,5 @@
 use crate::tor::error::TorError;
-use crate::transports::socks5::multiaddr_to_socketaddr;
 use futures::future::MapErr;
-use futures::FutureExt;
 use libp2p::{multiaddr::Protocol, Multiaddr};
 use libp2p_core::transport::{ListenerId, Transport, TransportError, TransportEvent};
 use libp2p_dns::TokioDnsConfig;
@@ -9,38 +7,91 @@ use libp2p_tcp::{tokio::TcpStream, GenTcpTransport};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::task::Poll;
-use tokio_socks::tcp::Socks5Stream;
+use tokio::sync::mpsc;
 
 pub struct TorTransport {
-    proxy_addr: Multiaddr,
+    proxy_addr: Option<Multiaddr>,
+    tor_map_receiver: Option<mpsc::Receiver<(Multiaddr, Multiaddr)>>,
     tor_map: HashMap<Multiaddr, Multiaddr>,
 }
 
+impl Default for TorTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Dial:
+// - /dns/www.google.com/https/tor -> /dns/www.google.com/socks5/ip4/127.0.0.1/tcp/9050
+// - /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234 ->
+//      /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234/socks5/ip4/127.0.0.1/tcp/9050
+// Listen:
+// - /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234 ->
+//      /ip4/127.0.0.1/tcp/1234
 impl TorTransport {
-    pub fn new(proxy_addr: Multiaddr) -> Result<Self, std::io::Error> {
-        Ok(Self {
-            proxy_addr,
+    pub fn new() -> Self {
+        Self {
+            proxy_addr: None,
+            tor_map_receiver: None,
             tor_map: HashMap::new(),
-        })
+        }
+    }
+
+    pub fn initialize(
+        &mut self,
+        proxy_addr: Multiaddr,
+        receiver: mpsc::Receiver<(Multiaddr, Multiaddr)>,
+    ) {
+        self.proxy_addr = Some(proxy_addr);
+        self.tor_map_receiver = Some(receiver);
     }
 
     fn do_dial(
         &mut self,
-        addr: Multiaddr,
+        mut addr: Multiaddr,
     ) -> Result<<Self as Transport>::Dial, TransportError<<Self as Transport>::Error>> {
-        let socket_addr = match multiaddr_to_socketaddr(addr.clone()) {
-            Ok(socket_addr) => socket_addr,
-            Err(_) => Err(TransportError::MultiaddrNotSupported(addr))?,
-        };
-        let proxy_addr = multiaddr_to_socketaddr(self.proxy_addr.clone())
-            .map_err(|e| TransportError::Other(e.into()))?;
-        Ok(async move {
-            match Socks5Stream::connect(proxy_addr, socket_addr).await {
-                Ok(connection) => Ok(TcpStream(connection.into_inner())),
-                Err(error) => Err(error.into()),
+        if self.proxy_addr.is_some() {
+            let proxy_addr = self.proxy_addr.clone().unwrap();
+            match addr.clone().pop() {
+                // /dns/www.google.com/https/tor -> /dns/www.google.com/socks5/ip4/127.0.0.1/tcp/9050
+                Some(Protocol::Tor) => {
+                    let last = addr.pop().unwrap();
+                    match last {
+                        Protocol::Tor => {
+                            for protocol in proxy_addr.iter() {
+                                addr.push(protocol);
+                            }
+                        }
+                        _ => {
+                            addr.push(last);
+                        }
+                    }
+                    Err(TransportError::MultiaddrNotSupported(addr))
+                }
+
+                // /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234 ->
+                //      /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234/socks5/ip4/127.0.0.1/tcp/9050
+                Some(Protocol::Onion3(address)) => {
+                    addr.pop();
+                    let onion_address = format!(
+                        "{}.onion",
+                        base32::encode(
+                            base32::Alphabet::RFC4648 { padding: false },
+                            address.hash()
+                        )
+                        .to_ascii_lowercase()
+                    );
+                    addr.push(Protocol::Dns(std::borrow::Cow::Borrowed(&onion_address)));
+                    addr.push(Protocol::Tcp(address.port()));
+                    addr.push(Protocol::Socks5(proxy_addr));
+                    Err(TransportError::MultiaddrNotSupported(addr))
+                }
+
+                _ => Err(TransportError::MultiaddrNotSupported(addr)),
             }
+        } else {
+            Err(TransportError::MultiaddrNotSupported(addr))
         }
-        .boxed())
     }
 }
 
@@ -56,17 +107,19 @@ impl Transport for TorTransport {
         ) -> Self::Error,
     >;
 
+    // NOTE: We can't bind/listen on the Tor SOCKS proxy, so we can't listen for /.../tor
+    // addresses; however we do listen on a local port (or unix socket) for Onion3 addresses
     fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
         let protocol = addr.clone().pop();
         let mut new_address = Multiaddr::empty();
         match protocol {
             Some(Protocol::Onion3(address)) => {
-                new_address.push(Protocol::Tcp(address.port()));
                 new_address.push(Protocol::Ip4(Ipv4Addr::LOCALHOST));
+                new_address.push(Protocol::Tcp(address.port()));
                 self.tor_map.insert(addr, new_address.clone());
             }
             Some(_) => {
-                new_address = addr.clone();
+                new_address = addr;
             }
             None => (),
         }
@@ -78,22 +131,11 @@ impl Transport for TorTransport {
     }
 
     fn dial(&mut self, mut addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let protocol = addr.pop();
+        let protocol = addr.clone().pop();
         match protocol {
             Some(Protocol::Tor) => self.do_dial(addr),
-            Some(Protocol::Onion3(address)) => {
-                let onion_address = format!(
-                    "{}.onion",
-                    base32::encode(base32::Alphabet::RFC4648 { padding: false }, address.hash())
-                );
-                addr.push(Protocol::Tcp(address.port()));
-                addr.push(Protocol::Dns(std::borrow::Cow::Borrowed(&onion_address)));
-                self.do_dial(addr)
-            }
-            Some(protocol) => {
-                addr.push(protocol);
-                Err(TransportError::MultiaddrNotSupported(addr))
-            }
+            Some(Protocol::Onion3(_)) => self.do_dial(addr),
+            Some(_) => Err(TransportError::MultiaddrNotSupported(addr)),
             None => Err(TransportError::MultiaddrNotSupported(addr)),
         }
     }
@@ -102,12 +144,11 @@ impl Transport for TorTransport {
         &mut self,
         addr: Multiaddr,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        // TODO: Figure out what this actually means
-        self.do_dial(addr)
+        self.dial(addr)
     }
 
     fn address_translation(&self, listen: &Multiaddr, _observed: &Multiaddr) -> Option<Multiaddr> {
-        self.tor_map.get(listen).map(|a| a.clone())
+        self.tor_map.get(listen).cloned()
     }
 
     fn poll(
@@ -121,50 +162,76 @@ impl Transport for TorTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures;
-    use socks5_proto::{Address, Reply};
-    use socks5_server::{auth::NoAuth, Connection, Server};
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn do_test(
+        transport: &mut TorTransport,
+        addr: &str,
+        expected: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let address: Multiaddr = addr.parse().unwrap();
+        match transport.dial(address.clone()) {
+            Ok(_) => assert!(false, "Transport should not return a future"),
+            Err(TransportError::MultiaddrNotSupported(addr)) => {
+                assert_eq!(expected.parse::<Multiaddr>().unwrap(), addr);
+            }
+            Err(error) => Err(error)?,
+        }
+
+        Ok(())
+    }
 
     #[tokio::test]
-    async fn test_tor_connect() -> Result<(), Box<dyn std::error::Error>> {
-        let server = Server::bind("127.0.0.1:5000", Arc::new(NoAuth))
-            .await
-            .unwrap();
+    async fn test_dial_noproxy() -> Result<(), Box<dyn std::error::Error>> {
+        let mut transport = TorTransport::default();
+        do_test(
+            &mut transport,
+            "/ip4/10.11.12.13/tcp/80",
+            "/ip4/10.11.12.13/tcp/80",
+        )?;
+        do_test(
+            &mut transport,
+            "/dns/www.google.com/tcp/80",
+            "/dns/www.google.com/tcp/80",
+        )?;
+        do_test(
+            &mut transport,
+            "/ip4/10.11.12.13/tcp/80/tor",
+            "/ip4/10.11.12.13/tcp/80/tor",
+        )?;
+        do_test(
+            &mut transport,
+            "/onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234",
+            "/onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234",
+        )?;
 
-        tokio::spawn(async move {
-            while let Ok((conn, _)) = server.accept().await {
-                match conn.handshake().await.unwrap() {
-                    Connection::Connect(connect, _addr) => {
-                        let mut conn = connect
-                            .reply(Reply::Succeeded, Address::unspecified())
-                            .await
-                            .unwrap();
-                        let mut buf = [0; 80];
-                        conn.read(&mut buf[..]).await.unwrap();
-                        conn.write("Pong!".as_bytes()).await.unwrap();
-                    }
-                    _ => panic!("Whaaaa?"),
-                }
-            }
-        });
+        Ok(())
+    }
 
-        let mut transport = TorTransport::new("/ip4/127.0.0.1/tcp/5000".parse().unwrap())?;
-
-        let mut stream = transport
-            .dial(
-                "/onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234"
-                    .parse()
-                    .unwrap(),
-            )?
-            .await?;
-
-        futures::AsyncWriteExt::write(&mut stream, "Ping!".as_bytes()).await?;
-        let mut buf = [0; 80];
-        let bytes_read = futures::AsyncReadExt::read(&mut stream, &mut buf).await?;
-
-        assert_eq!("Pong!", std::str::from_utf8(&buf[..bytes_read])?);
+    #[tokio::test]
+    async fn test_dial_proxy() -> Result<(), Box<dyn std::error::Error>> {
+        let mut transport = TorTransport::default();
+        let (_tx, rx) = mpsc::channel(10);
+        transport.initialize("/ip4/127.0.0.1/tcp/9050".parse().unwrap(), rx);
+        do_test(
+            &mut transport,
+            "/ip4/10.11.12.13/tcp/80",
+            "/ip4/10.11.12.13/tcp/80",
+        )?;
+        do_test(
+            &mut transport,
+            "/dns/www.google.com/tcp/80",
+            "/dns/www.google.com/tcp/80",
+        )?;
+        do_test(
+            &mut transport,
+            "/ip4/10.11.12.13/tcp/80/tor",
+            "/ip4/10.11.12.13/tcp/80/ip4/127.0.0.1/tcp/9050",
+        )?;
+        do_test(
+            &mut transport,
+            "/onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234",
+            "/dns/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion/tcp/1234/socks5/ip4/127.0.0.1/tcp/9050",
+        )?;
 
         Ok(())
     }
