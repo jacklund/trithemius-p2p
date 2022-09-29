@@ -167,10 +167,11 @@ impl Transport for Socks5Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::channel::mpsc;
+    use futures::{SinkExt, StreamExt};
     use socks5_proto::{Address, Reply};
     use socks5_server::{auth::NoAuth, Connection, Server};
     use std::sync::Arc;
-    use tokio::sync::mpsc;
     use tokio_socks::Error as SocksError;
 
     async fn handle(conn: Connection) -> Result<Option<Multiaddr>, std::io::Error> {
@@ -197,195 +198,156 @@ mod tests {
         }
     }
 
-    struct Tester {
-        transport: Socks5Transport,
-        address_rx: mpsc::Receiver<Multiaddr>,
-    }
-
-    impl Tester {
-        async fn test(
-            &mut self,
-            addr: Multiaddr,
-            expected: Result<Multiaddr, TransportError<SocksError>>,
-        ) {
-            match expected {
-                Ok(address) => match self.transport.dial(addr) {
-                    Ok(future) => {
-                        future.await.unwrap();
-                        let actual_address = self.address_rx.recv().await.unwrap();
-                        assert_eq!(address, actual_address);
-                    }
-                    Err(error) => {
-                        println!("Error: {:?}", error);
-                        assert!(false);
-                    }
-                },
-                Err(error) => match self.transport.dial(addr) {
-                    Ok(_) => {
-                        println!("Got success when expecting {:?}", error);
-                        assert!(false);
-                    }
-                    Err(actual_error) => match error {
-                        TransportError::MultiaddrNotSupported(expected_addr) => {
-                            match actual_error {
-                                TransportError::MultiaddrNotSupported(actual_addr) => {
-                                    assert_eq!(expected_addr, actual_addr)
-                                }
-                                _ => assert!(false),
-                            }
-                        }
-                        _ => assert!(false),
-                    },
-                },
-            }
-        }
-    }
-
-    async fn setup() -> (
-        Socks5Transport,
-        Multiaddr,
-        mpsc::Sender<bool>,
-        mpsc::Receiver<Multiaddr>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    async fn listener(mut ready_tx: mpsc::Sender<Multiaddr>) -> Option<Multiaddr> {
         let server = Server::bind("127.0.0.1:0", Arc::new(NoAuth)).await.unwrap();
         let local_addr = server.local_addr().unwrap();
         let listen_addr: Multiaddr = format!("/ip4/{}/tcp/{}", local_addr.ip(), local_addr.port())
             .parse()
             .unwrap();
-        let (address_tx, address_rx) = mpsc::channel(1);
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<bool>(1);
-        let join_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    result = server.accept() => {
-                        let (conn, _) = result.unwrap();
-                        let connection = conn.handshake().await.unwrap();
-                        match handle(connection).await {
-                            Ok(Some(addr)) => {
-                                address_tx.send(addr).await.unwrap();
-                            },
-                            Ok(None) => (),
-                            Err(_) => (),
-                        }
-                    },
-                    _ = shutdown_rx.recv() => break,
-                };
-            }
-        });
-        (
-            Socks5Transport::default(),
-            listen_addr,
-            shutdown_tx,
-            address_rx,
-            join_handle,
-        )
+        ready_tx.send(listen_addr).await.unwrap();
+        let (conn, _) = server.accept().await.unwrap();
+        let connection = conn.handshake().await.unwrap();
+        match handle(connection).await {
+            Ok(Some(addr)) => Some(addr),
+            Ok(None) => None,
+            Err(_) => None,
+        }
     }
 
-    async fn teardown(shutdown_tx: mpsc::Sender<bool>, join_handle: tokio::task::JoinHandle<()>) {
-        shutdown_tx.send(true).await.unwrap();
-        join_handle.await.unwrap();
+    async fn dialer(
+        proxy_addr: Option<Multiaddr>,
+        dial_addr: Multiaddr,
+    ) -> Result<TcpStream, TransportError<SocksError>> {
+        let mut transport = Socks5Transport::default();
+        if proxy_addr.is_some() {
+            transport.initialize(proxy_addr.unwrap());
+        }
+
+        transport
+            .dial(dial_addr)?
+            .await
+            .map_err(TransportError::Other)
+    }
+
+    async fn test(
+        addr: Multiaddr,
+        add_proxy: bool,
+        use_proxy: bool,
+        expected: Result<Multiaddr, TransportError<SocksError>>,
+    ) {
+        let (ready_tx, mut ready_rx) = mpsc::channel(1);
+        let listener = listener(ready_tx);
+        let join_handle = tokio::spawn(listener);
+        let proxy_addr = ready_rx.next().await.unwrap();
+        let addr = if add_proxy {
+            let mut new_addr = addr.clone();
+            new_addr.push(Protocol::Socks5(proxy_addr.clone()));
+            new_addr
+        } else {
+            addr
+        };
+        let dialer = if use_proxy {
+            dialer(Some(proxy_addr), addr)
+        } else {
+            dialer(None, addr)
+        };
+        let result = dialer.await;
+        let actual_addr_opt = if expected.is_ok() {
+            join_handle.await.unwrap()
+        } else {
+            join_handle.abort();
+            None
+        };
+        if expected.is_err() {
+            match expected {
+                Err(TransportError::MultiaddrNotSupported(addr1)) => {
+                    assert!(result.is_err());
+                    match result {
+                        Err(TransportError::MultiaddrNotSupported(addr2)) => {
+                            assert_eq!(addr1, addr2);
+                        }
+                        _ => assert!(false),
+                    }
+                }
+                _ => assert!(false),
+            }
+        } else {
+            assert!(actual_addr_opt.is_some());
+            assert_eq!(expected.unwrap(), actual_addr_opt.unwrap());
+        }
     }
 
     #[tokio::test]
     async fn test_socks5_with_proxy() {
-        let (mut transport, listen_addr, shutdown_tx, address_rx, join_handle) = setup().await;
-        transport.initialize(listen_addr.clone());
+        test(
+            "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            false,
+            true,
+            Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
+        )
+        .await;
 
-        let mut tester = Tester {
-            transport,
-            address_rx,
-        };
+        test(
+            "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            true,
+            true,
+            Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
+        )
+        .await;
 
-        // Send IP address with and without explicit proxy
-        tester
-            .test(
-                format!("/ip4/1.2.3.4/tcp/5678/socks5{}", listen_addr)
-                    .as_str()
-                    .parse()
-                    .unwrap(),
-                Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
-            )
-            .await;
+        test(
+            "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            false,
+            true,
+            Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
+        )
+        .await;
 
-        tester
-            .test(
-                "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
-                Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
-            )
-            .await;
-
-        // Send DNS address with and without explicit proxy
-        tester
-            .test(
-                format!("/dns/www.foo.com/tcp/5678/socks5{}", listen_addr)
-                    .as_str()
-                    .parse()
-                    .unwrap(),
-                Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
-            )
-            .await;
-
-        tester
-            .test(
-                "/dns/www.foo.com/tcp/5678".parse().unwrap(),
-                Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
-            )
-            .await;
-
-        teardown(shutdown_tx, join_handle).await;
+        test(
+            "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            true,
+            true,
+            Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_socks5_no_proxy() {
-        let (transport, listen_addr, shutdown_tx, address_rx, join_handle) = setup().await;
-
-        let mut tester = Tester {
-            transport,
-            address_rx,
-        };
-
-        // Send IP address with and without explicit proxy
-        // Without explicit proxy should fail since we don't have a proxy configured
-        tester
-            .test(
-                format!("/ip4/1.2.3.4/tcp/5678/socks5{}", listen_addr)
-                    .as_str()
-                    .parse()
-                    .unwrap(),
-                Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
-            )
-            .await;
-
-        tester
-            .test(
+        test(
+            "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            false,
+            false,
+            Err(TransportError::MultiaddrNotSupported(
                 "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
-                Err(TransportError::MultiaddrNotSupported(
-                    "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
-                )),
-            )
-            .await;
+            )),
+        )
+        .await;
 
-        // Send DNS address with and without explicit proxy
-        tester
-            .test(
-                format!("/dns/www.foo.com/tcp/5678/socks5{}", listen_addr)
-                    .as_str()
-                    .parse()
-                    .unwrap(),
-                Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
-            )
-            .await;
+        test(
+            "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            true,
+            false,
+            Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
+        )
+        .await;
 
-        tester
-            .test(
+        test(
+            "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            false,
+            false,
+            Err(TransportError::MultiaddrNotSupported(
                 "/dns/www.foo.com/tcp/5678".parse().unwrap(),
-                Err(TransportError::MultiaddrNotSupported(
-                    "/dns/www.foo.com/tcp/5678".parse().unwrap(),
-                )),
-            )
-            .await;
+            )),
+        )
+        .await;
 
-        teardown(shutdown_tx, join_handle).await;
+        test(
+            "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            true,
+            false,
+            Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
+        )
+        .await;
     }
 }
