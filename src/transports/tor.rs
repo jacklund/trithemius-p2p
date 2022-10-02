@@ -4,21 +4,13 @@ use libp2p::{multiaddr::Protocol, Multiaddr};
 use libp2p_core::transport::{ListenerId, Transport, TransportError, TransportEvent};
 use libp2p_dns::TokioDnsConfig;
 use libp2p_tcp::{tokio::TcpStream, GenTcpTransport};
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::task::Poll;
 use tokio::sync::mpsc;
 
 pub struct TorTransport {
     proxy_addr: Option<Multiaddr>,
-    tor_map_receiver: Option<mpsc::Receiver<(Multiaddr, Multiaddr)>>,
-    tor_map: HashMap<Multiaddr, Multiaddr>,
-}
-
-impl Default for TorTransport {
-    fn default() -> Self {
-        Self::new()
-    }
+    address_tx: mpsc::Sender<(Multiaddr, Multiaddr)>,
 }
 
 // Dial:
@@ -29,21 +21,14 @@ impl Default for TorTransport {
 // - /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234 ->
 //      /ip4/127.0.0.1/tcp/1234
 impl TorTransport {
-    pub fn new() -> Self {
+    pub fn new(
+        proxy_addr: Option<Multiaddr>,
+        address_tx: mpsc::Sender<(Multiaddr, Multiaddr)>,
+    ) -> Self {
         Self {
-            proxy_addr: None,
-            tor_map_receiver: None,
-            tor_map: HashMap::new(),
+            proxy_addr,
+            address_tx,
         }
-    }
-
-    pub fn initialize(
-        &mut self,
-        proxy_addr: Multiaddr,
-        receiver: mpsc::Receiver<(Multiaddr, Multiaddr)>,
-    ) {
-        self.proxy_addr = Some(proxy_addr);
-        self.tor_map_receiver = Some(receiver);
     }
 
     fn do_dial(
@@ -107,7 +92,7 @@ impl Transport for TorTransport {
         ) -> Self::Error,
     >;
 
-    // NOTE: We can't bind/listen on the Tor SOCKS proxy, so we can't listen for /.../tor
+    // NOTE: We can't bind/listen on the Tor SOCKS proxy, so we can't listen for /tor
     // addresses; however we do listen on a local port (or unix socket) for Onion3 addresses
     fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
         let protocol = addr.clone().pop();
@@ -116,7 +101,10 @@ impl Transport for TorTransport {
             Some(Protocol::Onion3(address)) => {
                 new_address.push(Protocol::Ip4(Ipv4Addr::LOCALHOST));
                 new_address.push(Protocol::Tcp(address.port()));
-                self.tor_map.insert(addr, new_address.clone());
+                self.address_tx
+                    .clone()
+                    .try_send((new_address.clone(), addr))
+                    .unwrap();
             }
             Some(_) => {
                 new_address = addr;
@@ -130,7 +118,7 @@ impl Transport for TorTransport {
         false
     }
 
-    fn dial(&mut self, mut addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
         let protocol = addr.clone().pop();
         match protocol {
             Some(Protocol::Tor) => self.do_dial(addr),
@@ -148,7 +136,7 @@ impl Transport for TorTransport {
     }
 
     fn address_translation(&self, listen: &Multiaddr, _observed: &Multiaddr) -> Option<Multiaddr> {
-        self.tor_map.get(listen).cloned()
+        None
     }
 
     fn poll(

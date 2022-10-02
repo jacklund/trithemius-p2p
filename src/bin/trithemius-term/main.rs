@@ -161,6 +161,13 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 }
                 None
             }
+            EngineEvent::OnionServiceReady(onion_service) => {
+                self.ui.log_info(&format!(
+                    "Onion service {} is ready to receive connections",
+                    onion_service.address
+                ));
+                None
+            }
             EngineEvent::ConnectionEstablished {
                 peer_id,
                 endpoint,
@@ -234,7 +241,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 None
             }
             EngineEvent::Dialing(peer_id) => {
-                self.ui.log_info(&format!("Dialing {}", peer_id,));
+                // self.ui.log_info(&format!("Dialing {}", peer_id,));
                 None
             }
             EngineEvent::MdnsDiscovered(peers) => {

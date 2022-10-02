@@ -1,3 +1,4 @@
+use crate::tor::control_connection::OnionService;
 use crate::ChatMessage;
 use libp2p::{
     autonat::{Event as AutonatEvent, InboundProbeEvent, NatStatus, OutboundProbeEvent},
@@ -84,6 +85,7 @@ pub enum EngineEvent {
         peer: PeerId,
         addresses: Vec<Multiaddr>,
     },
+    OnionServiceReady(OnionService),
     Shutdown,
 
     // SwarmEvents

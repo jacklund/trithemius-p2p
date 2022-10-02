@@ -447,8 +447,11 @@ impl UI {
             .create_transient_onion_service(virt_port, listen_address)
             .await
         {
-            Ok(onion_service) => {
-                self.log_info(&format!("Created onion service {}", onion_service.address,));
+            Ok(service_address) => {
+                self.log_info(&format!(
+                    "Created onion service {}, waiting for it to be ready...",
+                    service_address
+                ));
             }
             Err(error) => {
                 self.log_error(&format!("Error creating onion service: {}", error));

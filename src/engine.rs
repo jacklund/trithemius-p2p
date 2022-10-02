@@ -5,7 +5,10 @@ use crate::tor::{
     control_connection::{OnionService, TorControlConnection},
     error::TorError,
 };
-use crate::transports::tor::TorTransport;
+use crate::transports::socks5::multiaddr_to_socketaddr;
+use crate::transports::{
+    listen_wrapper::ListenWrapper, socks5::Socks5Transport, tor::TorTransport,
+};
 use crate::Handler;
 use futures::stream::FusedStream;
 use libp2p::{
@@ -37,6 +40,9 @@ use libp2p_tcp::{GenTcpConfig, TokioTcpTransport};
 use log::debug;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio_socks::tcp::Socks5Stream;
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -68,17 +74,28 @@ pub struct EngineBehaviour {
 }
 
 pub fn create_transport(
-    tor_proxy_address: Multiaddr,
+    proxy_addr: Option<Multiaddr>,
 ) -> Result<
-    Boxed<EitherOutput<libp2p_tcp::tokio::TcpStream, libp2p_tcp::tokio::TcpStream>>,
+    Boxed<
+        EitherOutput<
+            EitherOutput<libp2p_tcp::tokio::TcpStream, libp2p_tcp::tokio::TcpStream>,
+            libp2p_tcp::tokio::TcpStream,
+        >,
+    >,
     Box<dyn std::error::Error>,
 > {
-    // Create a keypair for authenticated encryption of the transport.
-    // TODO: Add SOCKS5 transport
-    Ok(TorTransport::new(tor_proxy_address)?
-        .or_transport(TokioDnsConfig::system(TokioTcpTransport::new(
-            GenTcpConfig::default().nodelay(true),
-        ))?)
+    let (address_tx, address_rx) = mpsc::channel(100);
+    let tor_transport = TorTransport::new(proxy_addr, address_tx);
+
+    // TODO: Add Socks5 config
+    Ok(tor_transport
+        .or_transport(Socks5Transport::default())
+        .or_transport(ListenWrapper::new(
+            TokioDnsConfig::system(TokioTcpTransport::new(
+                GenTcpConfig::default().nodelay(true),
+            ))?,
+            address_rx,
+        ))
         .boxed())
 }
 
@@ -100,7 +117,7 @@ pub enum InputEvent {
     Shutdown,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     pub gossipsub_config: GossipsubConfig,
     pub autonat_config: Option<autonat::Config>,
@@ -111,25 +128,7 @@ pub struct EngineConfig {
     pub mdns_config: Option<MdnsConfig>,
     pub rendezvous_server: bool,
     pub rendezvous_client: bool,
-    pub tor_proxy_address: Multiaddr,
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            gossipsub_config: Default::default(),
-            autonat_config: Default::default(),
-            use_circuit_relay: Default::default(),
-            use_dcutr: Default::default(),
-            kademlia_type: Default::default(),
-            kademlia_config: Default::default(),
-            mdns_config: Default::default(),
-            rendezvous_server: Default::default(),
-            rendezvous_client: Default::default(),
-            tor_proxy_address: Multiaddr::from_str("/tcp/9050/ip4/127.0.0.1")
-                .expect("Multiaddr parse failed"),
-        }
-    }
+    pub tor_proxy_address: Option<Multiaddr>,
 }
 
 impl From<Cli> for EngineConfig {
@@ -160,6 +159,11 @@ impl From<Cli> for EngineConfig {
             config.rendezvous_server = true;
         }
 
+        if cli.use_tor && cli.tor_proxy_address.is_none() {
+            config.tor_proxy_address =
+                Some(Multiaddr::from_str("/ip4/127.0.0.1/tcp/9050").unwrap());
+        }
+
         config
     }
 }
@@ -172,6 +176,9 @@ pub struct Engine {
     event_queue: VecDeque<EngineEvent>,
     discovery_types: Vec<Discovery>,
     nat_traversal_types: Vec<NatTraversal>,
+    listen_address_map: HashMap<Multiaddr, Multiaddr>,
+    tor_proxy_address: Option<Multiaddr>,
+    pending_onion_services: VecDeque<OnionService>,
 }
 
 impl Engine {
@@ -184,7 +191,7 @@ impl Engine {
             .into_authentic(&keypair)
             .expect("Signing libp2p-noise static DH keypair failed.");
 
-        let transport = create_transport(config.tor_proxy_address)?
+        let transport = create_transport(config.tor_proxy_address.clone())?
             .upgrade(upgrade::Version::V1)
             .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
             .multiplex(mplex::MplexConfig::new())
@@ -282,6 +289,9 @@ impl Engine {
             event_queue: VecDeque::new(),
             discovery_types: discovery,
             nat_traversal_types: nat_traversal,
+            listen_address_map: HashMap::new(),
+            tor_proxy_address: config.tor_proxy_address,
+            pending_onion_services: VecDeque::new(),
         })
     }
 
@@ -308,8 +318,15 @@ impl Engine {
     pub async fn create_transient_onion_service(
         &mut self,
         virt_port: u16,
-        target_port: u16,
-    ) -> Result<OnionService, Box<dyn std::error::Error>> {
+        listen_address: Multiaddr,
+    ) -> Result<Multiaddr, Box<dyn std::error::Error>> {
+        let proxy_address = self.tor_proxy_address.clone();
+        if self.tor_proxy_address.is_none() {
+            Err(EngineError::Error(
+                "No Tor proxy address configured".to_string(),
+            ))?
+        }
+
         self.get_tor_connection()
             .await?
             .authenticate(TorAuthentication::Null)
@@ -318,13 +335,18 @@ impl Engine {
         let onion_service = self
             .get_tor_connection()
             .await?
-            .create_transient_onion_service(virt_port, target_port)
+            .create_transient_onion_service(
+                virt_port,
+                listen_address.clone(),
+                proxy_address.unwrap(),
+            )
             .await?;
 
-        // Send the onion address down, the Tor transport layer will translate it
-        self.listen(onion_service.address.clone())?;
+        let service_address = onion_service.address.clone();
 
-        Ok(onion_service)
+        self.pending_onion_services.push_back(onion_service);
+
+        Ok(service_address)
     }
 
     pub fn dial(&mut self, addr: Multiaddr) -> Result<(), DialError> {
@@ -459,12 +481,21 @@ impl Engine {
                     let engine_event = event.into();
                     match engine_event {
                         EngineEvent::NewListenAddr {
-                            listener_id: _,
+                            listener_id,
                             ref address,
                         } => {
-                            self.swarm
-                                .add_external_address(address.clone(), libp2p::swarm::AddressScore::Infinite);
-                            handler.handle_event(self, engine_event).await?;
+                            match self.listen_address_map.get(address) {
+                                Some(mapped_address) => {
+                                    self.swarm
+                                        .add_external_address(mapped_address.clone(), libp2p::swarm::AddressScore::Infinite);
+                                    handler.handle_event(self, EngineEvent::NewListenAddr { listener_id, address: mapped_address.clone() }).await?;
+                                },
+                                None => {
+                                    self.swarm
+                                        .add_external_address(address.clone(), libp2p::swarm::AddressScore::Infinite);
+                                    handler.handle_event(self, engine_event).await?;
+                                },
+                            };
                         },
                         // Kademlia query has completed, we can check the peer addresses now
                         EngineEvent::KadOutboundQueryCompleted {
@@ -483,6 +514,24 @@ impl Engine {
                         }
                         _ => { handler.handle_event(self, engine_event).await?; }
                     }
+                }
+            }
+
+            for _ in 0..self.pending_onion_services.len() {
+                let mut onion_service = self.pending_onion_services.pop_front().unwrap();
+                let finished = onion_service
+                    .join_handle
+                    .as_ref()
+                    .map(|j| j.is_finished())
+                    .unwrap();
+                if finished {
+                    self.listen(onion_service.address.clone())?;
+                    onion_service.join_handle.take().unwrap().await??;
+                    handler
+                        .handle_event(self, EngineEvent::OnionServiceReady(onion_service))
+                        .await?;
+                } else {
+                    self.pending_onion_services.push_back(onion_service);
                 }
             }
 
@@ -506,7 +555,7 @@ mod tests {
     #[test]
     fn handle_multiaddrs() -> Result<(), Box<dyn std::error::Error>> {
         async fn listener(addr: Multiaddr, mut ready_tx: mpsc::Sender<Multiaddr>) {
-            let mut transport = create_transport(Multiaddr::empty()).unwrap();
+            let mut transport = create_transport(TorTransport::default()).unwrap();
             transport.listen_on(addr).unwrap();
             loop {
                 match transport.select_next_some().await {
@@ -528,7 +577,7 @@ mod tests {
 
         async fn dialer(mut ready_rx: mpsc::Receiver<Multiaddr>) {
             let addr = ready_rx.next().await.unwrap();
-            let mut transport = create_transport(Multiaddr::empty()).unwrap();
+            let mut transport = create_transport(TorTransport::default()).unwrap();
 
             // Obtain a future socket through dialing
             let mut socket = transport.dial(addr.clone()).unwrap().await.unwrap();
