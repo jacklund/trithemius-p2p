@@ -6,8 +6,8 @@ use futures::task::Poll;
 use futures_lite::stream::StreamExt;
 use libp2p::{core::ConnectedPoint, identity, PeerId};
 use log::debug;
-// use log::LevelFilter;
-// use simple_logging;
+use log::LevelFilter;
+use simple_logging;
 use std::pin::Pin;
 use std::task::Context;
 use trithemiuslib::{
@@ -348,7 +348,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env_logger::init();
-    // simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
+    simple_logging::log_to_file("trithemius.log", LevelFilter::Debug)?;
 
     let cli = Cli::parse();
 

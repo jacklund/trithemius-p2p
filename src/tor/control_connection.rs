@@ -27,48 +27,6 @@ pub struct OnionService {
     pub listen_address: Multiaddr,
     pub service_id: String,
     pub address: Multiaddr,
-    pub join_handle: Option<JoinHandle<Result<(), std::io::Error>>>,
-}
-
-impl OnionService {
-    fn start_readiness_probe(
-        listen_address: Multiaddr,
-        proxy_address: Multiaddr,
-        service_id: &str,
-        port: u16,
-    ) -> JoinHandle<Result<(), std::io::Error>> {
-        let (tx, mut rx) = mpsc::channel(1);
-        let join_handle: JoinHandle<Result<(), std::io::Error>> = tokio::spawn(async move {
-            let socket_addr = multiaddr_to_socketaddr(listen_address.clone()).unwrap();
-            let listener = TcpListener::bind(socket_addr).await?;
-            loop {
-                tokio::select! {
-                    _ = listener.accept() => {},
-                    _ = rx.recv() => break,
-                }
-            }
-            Ok(())
-        });
-
-        let id = service_id.to_string();
-        let join_handle2 = tokio::spawn(async move {
-            loop {
-                if let Ok(_stream) = Socks5Stream::connect(
-                    multiaddr_to_socketaddr(proxy_address.clone()).unwrap(),
-                    format!("{}.onion:{}", id, port),
-                )
-                .await
-                {
-                    tx.send(()).await.unwrap();
-                    break;
-                }
-            }
-
-            join_handle.await?
-        });
-
-        join_handle2
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -239,14 +197,9 @@ impl TorControlConnection {
         }
     }
 
-    pub async fn create_transient_onion_service(
-        &mut self,
-        virt_port: u16,
-        listen_address: Multiaddr,
-        proxy_address: Multiaddr,
-    ) -> Result<OnionService, TorError> {
+    fn get_listen_address_string(listen_address: &Multiaddr) -> Result<String, TorError> {
         let mut iter = listen_address.iter();
-        let listen_address_str = match iter.next() {
+        match iter.next() {
             Some(Protocol::Ip4(ip4)) => match iter.next() {
                 Some(Protocol::Tcp(port)) => Ok(format!("{}:{}", ip4, port)),
                 _ => Err(TorError::ProtocolError(format!(
@@ -266,7 +219,18 @@ impl TorControlConnection {
                 "Bad address: {}",
                 listen_address
             ))),
-        }?;
+        }
+    }
+
+    pub async fn create_transient_onion_service(
+        &mut self,
+        virt_port: u16,
+        listen_address: Multiaddr,
+    ) -> Result<OnionService, TorError> {
+        // Parse listen address into string
+        let listen_address_str = Self::get_listen_address_string(&listen_address)?;
+
+        // Send command to Tor controller
         let control_response = self
             .send_command(
                 "ADD_ONION",
@@ -280,11 +244,14 @@ impl TorControlConnection {
             "Sent ADD_ONION command, got control response {:?}",
             control_response
         );
+
+        // Parse the controller response
         lazy_static! {
             static ref RE: Regex = Regex::new(r"^[^=]*=(?P<value>.*)$").unwrap();
         }
         match RE.captures(&control_response.response[0]) {
             Some(captures) => {
+                // Parse the Hash value
                 let hash_string = &captures["value"];
                 let hash: [u8; 35] =
                     base32::decode(base32::Alphabet::RFC4648 { padding: false }, hash_string)
@@ -292,19 +259,17 @@ impl TorControlConnection {
                         .as_slice()
                         .try_into()
                         .unwrap();
+
+                // Create the Multiaddr
                 let mut addr = Multiaddr::empty();
                 addr.push(Protocol::Onion3(Onion3Addr::from((hash, virt_port))));
+
+                // Return the Onion Service
                 Ok(OnionService {
                     virt_port,
                     listen_address: listen_address.clone(),
                     service_id: hash_string.to_string(),
                     address: addr,
-                    join_handle: Some(OnionService::start_readiness_probe(
-                        listen_address,
-                        proxy_address,
-                        hash_string,
-                        virt_port,
-                    )),
                 })
             }
             None => Err(TorError::ProtocolError(format!(
@@ -315,6 +280,7 @@ impl TorControlConnection {
         }
     }
 
+    // TODO: Do we need this?
     pub async fn get_hidden_service_port_mappings(
         &mut self,
     ) -> Result<Vec<(u16, Multiaddr)>, TorError> {

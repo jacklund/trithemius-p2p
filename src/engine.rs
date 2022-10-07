@@ -1,11 +1,8 @@
 use crate::cli::{Cli, Discovery, NatTraversal};
 use crate::engine_event::EngineEvent;
 use crate::tor::{
-    auth::TorAuthentication,
-    control_connection::{OnionService, TorControlConnection},
-    error::TorError,
+    auth::TorAuthentication, control_connection::TorControlConnection, error::TorError,
 };
-use crate::transports::socks5::multiaddr_to_socketaddr;
 use crate::transports::{
     listen_wrapper::ListenWrapper, socks5::Socks5Transport, tor::TorTransport,
 };
@@ -40,9 +37,7 @@ use libp2p_tcp::{GenTcpConfig, TokioTcpTransport};
 use log::debug;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio_socks::tcp::Socks5Stream;
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -178,7 +173,6 @@ pub struct Engine {
     nat_traversal_types: Vec<NatTraversal>,
     listen_address_map: HashMap<Multiaddr, Multiaddr>,
     tor_proxy_address: Option<Multiaddr>,
-    pending_onion_services: VecDeque<OnionService>,
 }
 
 impl Engine {
@@ -291,7 +285,6 @@ impl Engine {
             nat_traversal_types: nat_traversal,
             listen_address_map: HashMap::new(),
             tor_proxy_address: config.tor_proxy_address,
-            pending_onion_services: VecDeque::new(),
         })
     }
 
@@ -320,13 +313,6 @@ impl Engine {
         virt_port: u16,
         listen_address: Multiaddr,
     ) -> Result<Multiaddr, Box<dyn std::error::Error>> {
-        let proxy_address = self.tor_proxy_address.clone();
-        if self.tor_proxy_address.is_none() {
-            Err(EngineError::Error(
-                "No Tor proxy address configured".to_string(),
-            ))?
-        }
-
         self.get_tor_connection()
             .await?
             .authenticate(TorAuthentication::Null)
@@ -335,16 +321,18 @@ impl Engine {
         let onion_service = self
             .get_tor_connection()
             .await?
-            .create_transient_onion_service(
-                virt_port,
-                listen_address.clone(),
-                proxy_address.unwrap(),
-            )
+            .create_transient_onion_service(virt_port, listen_address.clone())
             .await?;
 
         let service_address = onion_service.address.clone();
 
-        self.pending_onion_services.push_back(onion_service);
+        self.listen(onion_service.address.clone())?;
+        match self.swarm.behaviour_mut().kademlia.as_mut() {
+            Some(kademlia) => {
+                self.query_map.insert(kademlia.bootstrap()?, self.peer_id);
+            }
+            None => (),
+        }
 
         Ok(service_address)
     }
@@ -517,24 +505,6 @@ impl Engine {
                 }
             }
 
-            for _ in 0..self.pending_onion_services.len() {
-                let mut onion_service = self.pending_onion_services.pop_front().unwrap();
-                let finished = onion_service
-                    .join_handle
-                    .as_ref()
-                    .map(|j| j.is_finished())
-                    .unwrap();
-                if finished {
-                    self.listen(onion_service.address.clone())?;
-                    onion_service.join_handle.take().unwrap().await??;
-                    handler
-                        .handle_event(self, EngineEvent::OnionServiceReady(onion_service))
-                        .await?;
-                } else {
-                    self.pending_onion_services.push_back(onion_service);
-                }
-            }
-
             while let Some(event) = self.event_queue.pop_front() {
                 handler.handle_event(self, event).await?;
             }
@@ -555,7 +525,10 @@ mod tests {
     #[test]
     fn handle_multiaddrs() -> Result<(), Box<dyn std::error::Error>> {
         async fn listener(addr: Multiaddr, mut ready_tx: mpsc::Sender<Multiaddr>) {
-            let mut transport = create_transport(TorTransport::default()).unwrap();
+            let mut transport = create_transport(Some(
+                Multiaddr::from_str("/ip4/127.0.0.1/tcp/9050").unwrap(),
+            ))
+            .unwrap();
             transport.listen_on(addr).unwrap();
             loop {
                 match transport.select_next_some().await {
@@ -577,7 +550,10 @@ mod tests {
 
         async fn dialer(mut ready_rx: mpsc::Receiver<Multiaddr>) {
             let addr = ready_rx.next().await.unwrap();
-            let mut transport = create_transport(TorTransport::default()).unwrap();
+            let mut transport = create_transport(Some(
+                Multiaddr::from_str("/ip4/127.0.0.1/tcp/9050").unwrap(),
+            ))
+            .unwrap();
 
             // Obtain a future socket through dialing
             let mut socket = transport.dial(addr.clone()).unwrap().await.unwrap();

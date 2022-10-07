@@ -170,7 +170,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dial_noproxy() -> Result<(), Box<dyn std::error::Error>> {
-        let mut transport = TorTransport::default();
+        let (tx, _rx) = mpsc::channel(10);
+        let mut transport = TorTransport::new(None, tx);
         do_test(
             &mut transport,
             "/ip4/10.11.12.13/tcp/80",
@@ -197,9 +198,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dial_proxy() -> Result<(), Box<dyn std::error::Error>> {
-        let mut transport = TorTransport::default();
-        let (_tx, rx) = mpsc::channel(10);
-        transport.initialize("/ip4/127.0.0.1/tcp/9050".parse().unwrap(), rx);
+        let (tx, _rx) = mpsc::channel(10);
+        let mut transport = TorTransport::new(Some("/ip4/127.0.0.1/tcp/9050".parse().unwrap()), tx);
         do_test(
             &mut transport,
             "/ip4/10.11.12.13/tcp/80",

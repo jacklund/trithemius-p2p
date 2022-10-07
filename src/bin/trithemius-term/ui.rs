@@ -449,7 +449,8 @@ impl UI {
         {
             Ok(service_address) => {
                 self.log_info(&format!(
-                    "Created onion service {}, waiting for it to be ready...",
+                    // "Created onion service {}, waiting for it to be ready...",
+                    "Created onion service {}",
                     service_address
                 ));
             }
