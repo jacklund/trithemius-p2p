@@ -6,60 +6,53 @@ use std::net::SocketAddr;
 use std::task::Poll;
 use tokio_socks::{tcp::Socks5Stream, Error as SocksError};
 
-pub fn multiaddr_to_socketaddr(mut addr: Multiaddr) -> Result<SocketAddr, SocksError> {
-    let mut port = None;
-    while let Some(proto) = addr.pop() {
-        match proto {
-            Protocol::Ip4(ipv4) => match port {
-                Some(port) => return Ok(SocketAddr::new(ipv4.into(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Ip6(ipv6) => match port {
-                Some(port) => return Ok(SocketAddr::new(ipv6.into(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Tcp(portnum) => match port {
-                Some(_) => return Err(SocksError::AddressTypeNotSupported),
-                None => port = Some(portnum),
-            },
-            Protocol::P2p(_) => {}
-            _ => return Err(SocksError::AddressTypeNotSupported),
+pub fn multiaddr_to_socketaddr(addr: Multiaddr) -> Result<SocketAddr, SocksError> {
+    let mut iter = addr.iter();
+    let port = match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
+        Some(Protocol::Tcp(tcp_port)) => tcp_port,
+        _ => return Err(SocksError::AddressTypeNotSupported),
+    };
+    let mut iter = addr.iter();
+    match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
+        Some(Protocol::Ip4(ipv4)) => {
+            return Ok(SocketAddr::new(ipv4.into(), port));
         }
+        Some(Protocol::Ip6(ipv6)) => {
+            return Ok(SocketAddr::new(ipv6.into(), port));
+        }
+        _ => (),
     }
     Err(SocksError::AddressTypeNotSupported)
 }
 
-pub fn multiaddr_to_pair(mut addr: Multiaddr) -> Result<(String, u16), SocksError> {
-    let mut port = None;
-    while let Some(proto) = addr.pop() {
-        match proto {
-            Protocol::Ip4(ipv4) => match port {
-                Some(port) => return Ok((ipv4.to_string(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Ip6(ipv6) => match port {
-                Some(port) => return Ok((ipv6.to_string(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Dns(dns) => match port {
-                Some(port) => return Ok((dns.into(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Dns4(dns) => match port {
-                Some(port) => return Ok((dns.into(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Dns6(dns) => match port {
-                Some(port) => return Ok((dns.into(), port)),
-                None => return Err(SocksError::AddressTypeNotSupported),
-            },
-            Protocol::Tcp(portnum) => match port {
-                Some(_) => return Err(SocksError::AddressTypeNotSupported),
-                None => port = Some(portnum),
-            },
-            Protocol::P2p(_) => {}
-            _ => return Err(SocksError::AddressTypeNotSupported),
+pub fn multiaddr_to_pair(addr: Multiaddr) -> Result<(String, u16), SocksError> {
+    let mut iter = addr.iter();
+    let port = match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
+        Some(Protocol::Tcp(tcp_port)) => tcp_port,
+        _ => return Err(SocksError::AddressTypeNotSupported),
+    };
+    let mut iter = addr.iter();
+    match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
+        Some(Protocol::Ip4(ipv4)) => {
+            return Ok((ipv4.to_string(), port));
         }
+        Some(Protocol::Ip6(ipv6)) => {
+            return Ok((ipv6.to_string(), port));
+        }
+        _ => (),
+    }
+    let mut iter = addr.iter();
+    match iter.find(|p| matches!(p, Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_))) {
+        Some(Protocol::Dns(dns)) => {
+            return Ok((dns.into(), port));
+        }
+        Some(Protocol::Dns4(dns)) => {
+            return Ok((dns.into(), port));
+        }
+        Some(Protocol::Dns6(dns)) => {
+            return Ok((dns.into(), port));
+        }
+        _ => (),
     }
     Err(SocksError::AddressTypeNotSupported)
 }

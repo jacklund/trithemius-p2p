@@ -21,7 +21,7 @@ use tokio::{
 use tokio_socks::tcp::Socks5Stream;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OnionService {
     pub virt_port: u16,
     pub listen_address: Multiaddr,
@@ -199,26 +199,30 @@ impl TorControlConnection {
 
     fn get_listen_address_string(listen_address: &Multiaddr) -> Result<String, TorError> {
         let mut iter = listen_address.iter();
-        match iter.next() {
-            Some(Protocol::Ip4(ip4)) => match iter.next() {
-                Some(Protocol::Tcp(port)) => Ok(format!("{}:{}", ip4, port)),
-                _ => Err(TorError::ProtocolError(format!(
-                    "Bad address: {}",
-                    listen_address
-                ))),
-            },
-            Some(Protocol::Ip6(ip6)) => match iter.next() {
-                Some(Protocol::Tcp(port)) => Ok(format!("{}:{}", ip6, port)),
-                _ => Err(TorError::ProtocolError(format!(
-                    "Bad address: {}",
-                    listen_address
-                ))),
-            },
-            Some(Protocol::Unix(path)) => Ok(format!("unix:{}", path)),
-            _ => Err(TorError::ProtocolError(format!(
+        let mut ip_string: Option<String> = None;
+        let mut port: Option<u16> = None;
+        match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
+            Some(Protocol::Ip4(ip4)) => {
+                ip_string = Some(format!("{}", ip4));
+            }
+            Some(Protocol::Ip6(ip6)) => {
+                ip_string = Some(format!("{}", ip6));
+            }
+            _ => (),
+        }
+        match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
+            Some(Protocol::Tcp(tcp_port)) => {
+                port = Some(tcp_port);
+            }
+            _ => (),
+        }
+        if ip_string.is_none() || port.is_none() {
+            Err(TorError::ProtocolError(format!(
                 "Bad address: {}",
                 listen_address
-            ))),
+            )))
+        } else {
+            Ok(format!("{}:{}", ip_string.unwrap(), port.unwrap()))
         }
     }
 
