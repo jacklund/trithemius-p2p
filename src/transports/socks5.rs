@@ -1,3 +1,4 @@
+use futures::future::BoxFuture;
 use futures::future::{FutureExt, Ready};
 use libp2p::{multiaddr::Protocol, Multiaddr};
 use libp2p_core::transport::{ListenerId, Transport, TransportError, TransportEvent};
@@ -6,11 +7,11 @@ use std::net::SocketAddr;
 use std::task::Poll;
 use tokio_socks::{tcp::Socks5Stream, Error as SocksError};
 
-pub fn multiaddr_to_socketaddr(addr: Multiaddr) -> Result<SocketAddr, SocksError> {
+pub fn multiaddr_to_socketaddr<Terr>(addr: Multiaddr) -> Result<SocketAddr, TransportError<Terr>> {
     let mut iter = addr.iter();
     let port = match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
         Some(Protocol::Tcp(tcp_port)) => tcp_port,
-        _ => return Err(SocksError::AddressTypeNotSupported),
+        _ => return Err(TransportError::MultiaddrNotSupported(addr)),
     };
     let mut iter = addr.iter();
     match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
@@ -22,14 +23,14 @@ pub fn multiaddr_to_socketaddr(addr: Multiaddr) -> Result<SocketAddr, SocksError
         }
         _ => (),
     }
-    Err(SocksError::AddressTypeNotSupported)
+    Err(TransportError::MultiaddrNotSupported(addr))
 }
 
-pub fn multiaddr_to_pair(addr: Multiaddr) -> Result<(String, u16), SocksError> {
+pub fn multiaddr_to_pair<Terr>(addr: Multiaddr) -> Result<(String, u16), TransportError<Terr>> {
     let mut iter = addr.iter();
     let port = match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
         Some(Protocol::Tcp(tcp_port)) => tcp_port,
-        _ => return Err(SocksError::AddressTypeNotSupported),
+        _ => return Err(TransportError::MultiaddrNotSupported(addr)),
     };
     let mut iter = addr.iter();
     match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
@@ -54,53 +55,81 @@ pub fn multiaddr_to_pair(addr: Multiaddr) -> Result<(String, u16), SocksError> {
         }
         _ => (),
     }
-    Err(SocksError::AddressTypeNotSupported)
+    Err(TransportError::MultiaddrNotSupported(addr))
 }
 
 pub struct Socks5Transport {
     proxy_addr: Option<Multiaddr>,
-}
-
-impl Default for Socks5Transport {
-    fn default() -> Self {
-        Self::new()
-    }
+    always_use: bool,
 }
 
 impl Socks5Transport {
     pub fn new() -> Self {
-        Self { proxy_addr: None }
-    }
-
-    pub fn initialize(&mut self, proxy_addr: Multiaddr) {
-        self.proxy_addr = Some(proxy_addr);
-    }
-
-    fn do_dial(
-        &mut self,
-        proxy_addr: Multiaddr,
-        addr: Multiaddr,
-    ) -> Result<<Self as Transport>::Dial, TransportError<<Self as Transport>::Error>> {
-        let proxy_addr = multiaddr_to_socketaddr(proxy_addr).map_err(TransportError::Other)?;
-        let socket_addr = match multiaddr_to_pair(addr.clone()) {
-            Ok(socket_addr) => socket_addr,
-            Err(_) => Err(TransportError::MultiaddrNotSupported(addr))?,
-        };
-        Ok(async move {
-            match Socks5Stream::connect(proxy_addr, socket_addr).await {
-                Ok(connection) => Ok(TcpStream(connection.into_inner())),
-                Err(error) => Err(error),
-            }
+        Self {
+            proxy_addr: None,
+            always_use: false,
         }
-        .boxed())
+    }
+
+    pub fn default_proxy_address(mut self, proxy_addr: Multiaddr) -> Self {
+        self.proxy_addr = Some(proxy_addr);
+
+        self
+    }
+
+    pub fn always_use(mut self) -> Self {
+        self.always_use = true;
+
+        self
+    }
+
+    pub fn do_dial(
+        &mut self,
+        mut addr: Multiaddr,
+    ) -> Result<
+        impl futures::Future<Output = Result<TcpStream, tokio_socks::Error>>,
+        TransportError<tokio_socks::Error>,
+    > {
+        if self.always_use
+            && addr
+                .iter()
+                .find(|p| matches!(p, Protocol::Socks5(_)))
+                .is_none()
+            && self.proxy_addr.is_some()
+        {
+            addr.push(Protocol::Socks5(self.proxy_addr.clone().unwrap()));
+        }
+
+        let mut iter = addr.iter();
+        if let Some(Protocol::Socks5(proxy_addr)) = iter.find(|p| matches!(p, Protocol::Socks5(_)))
+        {
+            let proxy_addr = if proxy_addr.is_empty() {
+                self.proxy_addr.clone()
+            } else {
+                Some(proxy_addr)
+            };
+            if proxy_addr.is_some() {
+                let proxy_addr = multiaddr_to_socketaddr(proxy_addr.unwrap())?;
+                let socket_addr = multiaddr_to_pair(addr.clone())?;
+                Ok(async move {
+                    match Socks5Stream::connect(proxy_addr, socket_addr).await {
+                        Ok(connection) => Ok(TcpStream(connection.into_inner())),
+                        Err(error) => Err(error),
+                    }
+                })
+            } else {
+                Err(TransportError::MultiaddrNotSupported(addr))
+            }
+        } else {
+            Err(TransportError::MultiaddrNotSupported(addr))
+        }
     }
 }
 
 impl Transport for Socks5Transport {
     type Output = TcpStream;
     type Error = SocksError;
-    type Dial =
-        std::pin::Pin<Box<dyn futures::Future<Output = Result<Self::Output, Self::Error>> + Send>>;
+    type Dial = BoxFuture<'static, Result<TcpStream, tokio_socks::Error>>;
     type ListenerUpgrade = Ready<Result<Self::Output, Self::Error>>;
 
     fn listen_on(&mut self, address: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
@@ -112,37 +141,14 @@ impl Transport for Socks5Transport {
     }
 
     fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let mut working_addr = addr.clone();
-        let protocol = working_addr.pop();
-        match protocol.clone() {
-            Some(Protocol::Socks5(proxy_addr)) => {
-                let proxy_addr = if proxy_addr.is_empty() {
-                    if self.proxy_addr.is_none() {
-                        Err(TransportError::MultiaddrNotSupported(addr.clone()))?;
-                    }
-                    self.proxy_addr.clone().unwrap()
-                } else {
-                    proxy_addr
-                };
-                self.do_dial(proxy_addr, working_addr)
-            }
-            Some(protocol) => {
-                if self.proxy_addr.is_some() {
-                    self.do_dial(self.proxy_addr.clone().unwrap(), addr)
-                } else {
-                    addr.clone().push(protocol);
-                    Err(TransportError::MultiaddrNotSupported(addr))
-                }
-            }
-            None => Err(TransportError::MultiaddrNotSupported(addr)),
-        }
+        Ok(self.do_dial(addr)?.boxed())
     }
 
     fn dial_as_listener(
         &mut self,
         addr: Multiaddr,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        self.dial(addr)
+        Ok(self.do_dial(addr)?.boxed())
     }
 
     fn address_translation(&self, _listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
@@ -210,10 +216,14 @@ mod tests {
     async fn dialer(
         proxy_addr: Option<Multiaddr>,
         dial_addr: Multiaddr,
+        always_use: bool,
     ) -> Result<TcpStream, TransportError<SocksError>> {
-        let mut transport = Socks5Transport::default();
+        let mut transport = Socks5Transport::new();
         if proxy_addr.is_some() {
-            transport.initialize(proxy_addr.unwrap());
+            transport = transport.default_proxy_address(proxy_addr.unwrap());
+        }
+        if always_use {
+            transport = transport.always_use();
         }
 
         transport
@@ -226,6 +236,7 @@ mod tests {
         addr: Multiaddr,
         add_proxy: bool,
         use_proxy: bool,
+        always_use: bool,
         expected: Result<Multiaddr, TransportError<SocksError>>,
     ) {
         let (ready_tx, mut ready_rx) = mpsc::channel(1);
@@ -240,9 +251,9 @@ mod tests {
             addr
         };
         let dialer = if use_proxy {
-            dialer(Some(proxy_addr), addr)
+            dialer(Some(proxy_addr), addr, always_use)
         } else {
-            dialer(None, addr)
+            dialer(None, addr, always_use)
         };
         let result = dialer.await;
         let actual_addr_opt = if expected.is_ok() {
@@ -276,7 +287,10 @@ mod tests {
             "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
             false,
             true,
-            Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
+            false,
+            Err(TransportError::MultiaddrNotSupported(
+                "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            )),
         )
         .await;
 
@@ -284,6 +298,7 @@ mod tests {
             "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
             true,
             true,
+            false,
             Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
         )
         .await;
@@ -292,7 +307,10 @@ mod tests {
             "/dns/www.foo.com/tcp/5678".parse().unwrap(),
             false,
             true,
-            Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
+            false,
+            Err(TransportError::MultiaddrNotSupported(
+                "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            )),
         )
         .await;
 
@@ -300,6 +318,7 @@ mod tests {
             "/dns/www.foo.com/tcp/5678".parse().unwrap(),
             true,
             true,
+            false,
             Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
         )
         .await;
@@ -309,6 +328,7 @@ mod tests {
     async fn test_socks5_no_proxy() {
         test(
             "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            false,
             false,
             false,
             Err(TransportError::MultiaddrNotSupported(
@@ -321,12 +341,14 @@ mod tests {
             "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
             true,
             false,
+            false,
             Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
         )
         .await;
 
         test(
             "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            false,
             false,
             false,
             Err(TransportError::MultiaddrNotSupported(
@@ -339,6 +361,46 @@ mod tests {
             "/dns/www.foo.com/tcp/5678".parse().unwrap(),
             true,
             false,
+            false,
+            Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_socks5_always_proxy() {
+        test(
+            "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            false,
+            true,
+            true,
+            Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
+        )
+        .await;
+
+        test(
+            "/ip4/1.2.3.4/tcp/5678".parse().unwrap(),
+            true,
+            true,
+            true,
+            Ok("/ip4/1.2.3.4/tcp/5678".parse().unwrap()),
+        )
+        .await;
+
+        test(
+            "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            false,
+            true,
+            true,
+            Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
+        )
+        .await;
+
+        test(
+            "/dns/www.foo.com/tcp/5678".parse().unwrap(),
+            true,
+            true,
+            true,
             Ok("/dns/www.foo.com/tcp/5678".parse().unwrap()),
         )
         .await;

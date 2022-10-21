@@ -1,5 +1,4 @@
 use crate::tor::{auth::TorAuthentication, error::TorError};
-use crate::transports::socks5::multiaddr_to_socketaddr;
 use base32;
 use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
@@ -12,13 +11,11 @@ use regex::Regex;
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tokio::sync::mpsc;
 use tokio::{
     io::{ReadHalf, WriteHalf},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
-    task::JoinHandle,
+    net::{TcpStream, ToSocketAddrs},
+    sync::mpsc,
 };
-use tokio_socks::tcp::Socks5Stream;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
 #[derive(Clone, Debug)]

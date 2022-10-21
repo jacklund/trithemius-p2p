@@ -118,4 +118,7 @@ pub struct Cli {
 
     #[clap(long, value_parser, value_name = "PROXY_ADDRESS")]
     pub tor_proxy_address: Option<Multiaddr>,
+
+    #[clap(long, value_parser, value_name = "CONTROL_ADDRESS")]
+    pub tor_control_address: Option<Multiaddr>,
 }

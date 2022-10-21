@@ -1,4 +1,3 @@
-use tokio::sync::oneshot;
 use tokio_socks::Error as Socks5Error;
 use tokio_util::codec::LinesCodecError;
 
@@ -6,7 +5,7 @@ use tokio_util::codec::LinesCodecError;
 pub enum TorError {
     AuthenticationError(String),
     ProtocolError(String),
-    IOError(String),
+    IOError(std::io::Error),
     Socks5Error(Socks5Error),
 }
 
@@ -41,13 +40,7 @@ impl From<Socks5Error> for TorError {
 
 impl From<std::io::Error> for TorError {
     fn from(error: std::io::Error) -> TorError {
-        TorError::IOError(error.to_string())
-    }
-}
-
-impl From<oneshot::error::RecvError> for TorError {
-    fn from(error: oneshot::error::RecvError) -> TorError {
-        TorError::IOError(error.to_string())
+        TorError::IOError(error)
     }
 }
 
