@@ -1,20 +1,16 @@
 use libp2p::{multiaddr::Protocol, Multiaddr};
 
-pub fn multiaddr_get<'a, P>(addr: &'a Multiaddr, predicate: P) -> Option<Protocol<'a>>
+pub fn multiaddr_get<P>(addr: &Multiaddr, predicate: P) -> Option<Protocol>
 where
     P: FnMut(&Protocol) -> bool,
 {
-    if let Some(proto) = addr.iter().find(predicate) {
-        Some(proto)
-    } else {
-        None
-    }
+    addr.iter().find(predicate)
 }
 
-pub fn multiaddr_split<'a, P>(
-    addr: &'a Multiaddr,
+pub fn multiaddr_split<P>(
+    addr: &Multiaddr,
     predicate: P,
-) -> Option<(Multiaddr, Protocol<'a>, Multiaddr)>
+) -> Option<(Multiaddr, Protocol, Multiaddr)>
 where
     P: FnMut(&(usize, Protocol)) -> bool,
 {
@@ -30,18 +26,17 @@ where
 pub fn multiaddr_replace<'a, P>(
     addr: &'a Multiaddr,
     predicate: P,
-    protocol: Protocol,
+    replacement: &'a Multiaddr,
 ) -> Option<Multiaddr>
 where
     P: FnMut(&(usize, Protocol)) -> bool,
 {
-    match multiaddr_split(addr, predicate) {
-        Some((mut prefix, _, suffix)) => {
-            prefix.push(protocol);
-            Some(prefix.iter().chain(suffix.iter()).collect::<Multiaddr>())
-        }
-        None => None,
-    }
+    multiaddr_split(addr, predicate).map(|(prefix, _, suffix)| {
+        prefix
+            .iter()
+            .chain(replacement.iter().chain(suffix.iter()))
+            .collect::<Multiaddr>()
+    })
 }
 
 #[cfg(test)]
@@ -104,12 +99,16 @@ mod tests {
     #[test]
     fn test_multiaddr_replace() {
         let addr: Multiaddr = "/ip4/10.11.12.13/tcp/8080/tor/p2p/12D3KooWKMziqhPLYnRhjHQ7Hdr45m4HhGUT6dovhAQM49ffPNe2".parse().unwrap();
-        match multiaddr_replace(&addr, |(_, p)| matches!(p, Protocol::Tor), Protocol::Http) {
+        match multiaddr_replace(&addr, |(_, p)| matches!(p, Protocol::Tor), &"/http".parse().unwrap()) {
             Some(addr) => assert_eq!("/ip4/10.11.12.13/tcp/8080/http/p2p/12D3KooWKMziqhPLYnRhjHQ7Hdr45m4HhGUT6dovhAQM49ffPNe2".parse::<Multiaddr>().unwrap(), addr),
             None => assert!(false),
         }
 
-        match multiaddr_replace(&addr, |(_, p)| matches!(p, Protocol::Http), Protocol::Tor) {
+        match multiaddr_replace(
+            &addr,
+            |(_, p)| matches!(p, Protocol::Http),
+            &"/tor".parse().unwrap(),
+        ) {
             Some(_) => assert!(false),
             None => assert!(true),
         }

@@ -241,7 +241,7 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 None
             }
             EngineEvent::Dialing(peer_id) => {
-                // self.ui.log_info(&format!("Dialing {}", peer_id,));
+                self.ui.log_info(&format!("Dialing {}", peer_id,));
                 None
             }
             EngineEvent::MdnsDiscovered(peers) => {
@@ -330,7 +330,10 @@ impl Handler<EngineBehaviour, TermInputStream> for MyHandler {
                 ));
                 None
             }
-            _ => None,
+            _ => {
+                self.ui.log_info(&format!("Got event: {:?}", event));
+                None
+            }
         })
     }
 

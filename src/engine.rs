@@ -300,7 +300,7 @@ impl Engine {
             .send(onion_service.clone())
             .await?;
 
-        self.listen(onion_service.address.clone())?;
+        self.listen(onion_service.listen_address.clone())?;
 
         match self.swarm.behaviour_mut().kademlia.as_mut() {
             Some(kademlia) => {

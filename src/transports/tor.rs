@@ -1,6 +1,7 @@
 use crate::tor::control_connection::OnionService;
 use crate::tor::error::TorError;
 use crate::transports::socks5::Socks5Transport;
+use crate::util;
 use futures::future::{BoxFuture, Ready};
 use futures::{FutureExt, TryFutureExt};
 use lazy_static::lazy_static;
@@ -92,52 +93,38 @@ impl TorTransport {
         TransportError<tokio_socks::Error>,
     > {
         if self.always_use
-            && addr
-                .iter()
-                .find(|p| matches!(p, Protocol::Tor | Protocol::Onion3(_)))
+            && util::multiaddr_get(&addr, |p| matches!(p, Protocol::Tor | Protocol::Onion3(_)))
                 .is_none()
         {
             addr.push(Protocol::Tor);
         }
 
         if self.outbound.is_some() {
-            let mut iter = addr.iter();
-            match iter.find(|p| matches!(p, Protocol::Tor | Protocol::Onion3(_))) {
-                // /dns/www.google.com/https/tor -> /dns/www.google.com/socks5/ip4/127.0.0.1/tcp/9050
-                Some(Protocol::Tor) => {
-                    let mut new_addr = Multiaddr::empty();
-                    for p in addr.iter() {
-                        if p == Protocol::Tor {
-                            new_addr.push(Protocol::Socks5(Multiaddr::empty()));
-                        } else {
-                            new_addr.push(p);
-                        }
-                    }
-                    self.outbound.as_mut().unwrap().do_dial(new_addr)
-                }
-
-                // /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234 ->
-                //      /onion3/vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd:1234/socks5/ip4/127.0.0.1/tcp/9050
-                Some(Protocol::Onion3(address)) => {
-                    let mut new_addr = Multiaddr::empty();
-                    // Remove the Onion3 address
-                    for p in addr.iter().filter(|p| !matches!(p, Protocol::Onion3(_))) {
-                        new_addr.push(p);
-                    }
-                    let onion_address = format!(
-                        "{}.onion",
-                        base32::encode(
-                            base32::Alphabet::RFC4648 { padding: false },
-                            address.hash()
-                        )
+            if let Some(new_addr) = util::multiaddr_replace(
+                &addr,
+                |(_, p)| matches!(p, Protocol::Tor),
+                &"/socks5".parse().unwrap(),
+            ) {
+                self.outbound.as_mut().unwrap().do_dial(new_addr)
+            } else if let Some(Protocol::Onion3(address)) =
+                util::multiaddr_get(&addr, |p| matches!(p, Protocol::Onion3(_)))
+            {
+                let onion_address = format!(
+                    "{}.onion",
+                    base32::encode(base32::Alphabet::RFC4648 { padding: false }, address.hash())
                         .to_ascii_lowercase()
-                    );
-                    // Push the onion address and port for Socks5 to consume
-                    new_addr.push(Protocol::Dns(std::borrow::Cow::Borrowed(&onion_address)));
-                    new_addr.push(Protocol::Tcp(address.port()));
-                    self.outbound.as_mut().unwrap().do_dial(new_addr)
-                }
-                _ => Err(TransportError::MultiaddrNotSupported(addr)),
+                );
+                let new_addr = util::multiaddr_replace(
+                    &addr,
+                    |(_, p)| matches!(p, Protocol::Onion3(_)),
+                    &format!("/dns/{}/tcp/{}", onion_address, address.port())
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap();
+                self.outbound.as_mut().unwrap().do_dial(new_addr)
+            } else {
+                Err(TransportError::MultiaddrNotSupported(addr))
             }
         } else {
             Err(TransportError::MultiaddrNotSupported(addr))
@@ -184,7 +171,7 @@ impl Transport for TorTransport {
         Ok(self
             .do_dial(addr)
             .map(|f| f.err_into())
-            .map_err(|e| transform_socks_error(e))?
+            .map_err(transform_socks_error)?
             .boxed())
     }
 

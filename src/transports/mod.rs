@@ -19,8 +19,8 @@ pub fn create_transport(
 ) -> Result<(mpsc::Sender<OnionService>, Boxed<(PeerId, StreamMuxerBox)>), std::io::Error> {
     let (onion_service_channel, rx) = mpsc::channel(1);
     let mut tor_transport = TorTransport::new().use_onion_service_channel(rx);
-    if tor_proxy_address.is_some() {
-        tor_transport = tor_transport.use_proxy_address(tor_proxy_address.unwrap());
+    if let Some(tor_proxy_address) = tor_proxy_address {
+        tor_transport = tor_transport.use_proxy_address(tor_proxy_address);
     } else {
         tor_transport = tor_transport.use_default_proxy_address();
     }
@@ -29,8 +29,8 @@ pub fn create_transport(
     }
 
     let mut socks_transport = Socks5Transport::new();
-    if socks_proxy_address.is_some() {
-        socks_transport = socks_transport.default_proxy_address(socks_proxy_address.unwrap());
+    if let Some(socks_proxy_address) = socks_proxy_address {
+        socks_transport = socks_transport.default_proxy_address(socks_proxy_address);
     }
 
     let dns_transport = TokioDnsConfig::system(TokioTcpTransport::new(

@@ -1,4 +1,5 @@
 use crate::tor::{auth::TorAuthentication, error::TorError};
+use crate::util;
 use base32;
 use futures::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
@@ -14,7 +15,6 @@ use std::str::FromStr;
 use tokio::{
     io::{ReadHalf, WriteHalf},
     net::{TcpStream, ToSocketAddrs},
-    sync::mpsc,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
@@ -195,10 +195,11 @@ impl TorControlConnection {
     }
 
     fn get_listen_address_string(listen_address: &Multiaddr) -> Result<String, TorError> {
-        let mut iter = listen_address.iter();
         let mut ip_string: Option<String> = None;
         let mut port: Option<u16> = None;
-        match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
+        match util::multiaddr_get(listen_address, |p| {
+            matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))
+        }) {
             Some(Protocol::Ip4(ip4)) => {
                 ip_string = Some(format!("{}", ip4));
             }
@@ -207,11 +208,10 @@ impl TorControlConnection {
             }
             _ => (),
         }
-        match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
-            Some(Protocol::Tcp(tcp_port)) => {
-                port = Some(tcp_port);
-            }
-            _ => (),
+        if let Some(Protocol::Tcp(tcp_port)) =
+            util::multiaddr_get(listen_address, |p| matches!(p, Protocol::Tcp(_)))
+        {
+            port = Some(tcp_port);
         }
         if ip_string.is_none() || port.is_none() {
             Err(TorError::ProtocolError(format!(

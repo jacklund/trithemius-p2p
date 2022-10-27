@@ -1,3 +1,4 @@
+use crate::util;
 use futures::future::BoxFuture;
 use futures::future::{FutureExt, Ready};
 use libp2p::{multiaddr::Protocol, Multiaddr};
@@ -8,13 +9,11 @@ use std::task::Poll;
 use tokio_socks::{tcp::Socks5Stream, Error as SocksError};
 
 pub fn multiaddr_to_socketaddr<Terr>(addr: Multiaddr) -> Result<SocketAddr, TransportError<Terr>> {
-    let mut iter = addr.iter();
-    let port = match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
+    let port = match util::multiaddr_get(&addr, |p| matches!(p, Protocol::Tcp(_))) {
         Some(Protocol::Tcp(tcp_port)) => tcp_port,
         _ => return Err(TransportError::MultiaddrNotSupported(addr)),
     };
-    let mut iter = addr.iter();
-    match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
+    match util::multiaddr_get(&addr, |p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
         Some(Protocol::Ip4(ipv4)) => {
             return Ok(SocketAddr::new(ipv4.into(), port));
         }
@@ -27,13 +26,11 @@ pub fn multiaddr_to_socketaddr<Terr>(addr: Multiaddr) -> Result<SocketAddr, Tran
 }
 
 pub fn multiaddr_to_pair<Terr>(addr: Multiaddr) -> Result<(String, u16), TransportError<Terr>> {
-    let mut iter = addr.iter();
-    let port = match iter.find(|p| matches!(p, Protocol::Tcp(_))) {
+    let port = match util::multiaddr_get(&addr, |p| matches!(p, Protocol::Tcp(_))) {
         Some(Protocol::Tcp(tcp_port)) => tcp_port,
         _ => return Err(TransportError::MultiaddrNotSupported(addr)),
     };
-    let mut iter = addr.iter();
-    match iter.find(|p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
+    match util::multiaddr_get(&addr, |p| matches!(p, Protocol::Ip4(_) | Protocol::Ip6(_))) {
         Some(Protocol::Ip4(ipv4)) => {
             return Ok((ipv4.to_string(), port));
         }
@@ -42,8 +39,9 @@ pub fn multiaddr_to_pair<Terr>(addr: Multiaddr) -> Result<(String, u16), Transpo
         }
         _ => (),
     }
-    let mut iter = addr.iter();
-    match iter.find(|p| matches!(p, Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_))) {
+    match util::multiaddr_get(&addr, |p| {
+        matches!(p, Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_))
+    }) {
         Some(Protocol::Dns(dns)) => {
             return Ok((dns.into(), port));
         }
@@ -91,17 +89,14 @@ impl Socks5Transport {
         TransportError<tokio_socks::Error>,
     > {
         if self.always_use
-            && addr
-                .iter()
-                .find(|p| matches!(p, Protocol::Socks5(_)))
-                .is_none()
+            && util::multiaddr_get(&addr, |p| matches!(p, Protocol::Socks5(_))).is_none()
             && self.proxy_addr.is_some()
         {
             addr.push(Protocol::Socks5(self.proxy_addr.clone().unwrap()));
         }
 
-        let mut iter = addr.iter();
-        if let Some(Protocol::Socks5(proxy_addr)) = iter.find(|p| matches!(p, Protocol::Socks5(_)))
+        if let Some(Protocol::Socks5(proxy_addr)) =
+            util::multiaddr_get(&addr, |p| matches!(p, Protocol::Socks5(_)))
         {
             let proxy_addr = if proxy_addr.is_empty() {
                 self.proxy_addr.clone()
